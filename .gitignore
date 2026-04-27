@@ -1,0 +1,22 @@
+# Secrets — never commit
+anthropic_api_key
+*.api_key
+*_api_key
+
+# Plugin runtime state
+cache.json
+stream_cache.json
+*.tmp
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.pytest_cache/
+
+# Editor
+.vscode/
+.idea/
+*.swp
+.DS_Store

@@ -1,0 +1,273 @@
+"""
+Two-stage classifier for IPTV M3U groups, plus per-stream classifier for mixed groups.
+
+Group-level (3-bucket):
+  Stage 1 (regex): match decisive league/network names -> pure_sports / not_sports.
+                   Generic "sport"/"sports" word match removed deliberately so that
+                   bouquet groups like "Sports | Peacock" defer to the LLM (which
+                   can identify them as 'mixed' from sample channel names).
+  Stage 2 (LLM):   batched call returning pure_sports / mixed / not_sports.
+
+Stream-level (binary, only run for groups marked 'mixed'):
+  LLM call:        for each (stream_name, group_context, ...), return sports / not_sports.
+
+Cache values persisted by the plugin:
+  - cache.json:        {group_name: 'pure_sports'|'mixed'|'not_sports'}
+  - stream_cache.json: {stream_name: 'sports'|'not_sports'}
+
+Note: legacy v1 cache values 'sports' (binary) get dropped on load by the plugin so
+they re-flow through this ternary classifier.
+"""
+
+from __future__ import annotations
+
+import json
+import logging
+import re
+import time
+import urllib.request
+from typing import Dict, Iterable, List, Optional, Tuple
+
+logger = logging.getLogger("plugins.dispatcharr_sports_filter.classifier")
+
+# ALLOW_RE matches ONLY decisive sport-league / sport-network keywords.
+# We removed bare 'sport'/'sports' so that ambiguous bouquet names defer to the LLM,
+# which can decide between pure_sports and mixed using sample channel content.
+ALLOW_RE = re.compile(
+    r"\b("
+    r"nfl|nba|mlb|nhl|nascar|mls|epl|efl|laliga|bundesliga|seriea|"
+    r"ucl|uefa|fifa|conmebol|copa|"
+    r"ufc|wwe|aew|boxing|mma|"
+    r"f1|formula\s*1|motogp|indycar|wrc|"
+    r"tennis|atp|wta|"
+    r"golf|pga|liv\s*golf|"
+    r"cricket|ipl|"
+    r"rugby|nrl|afl|"
+    r"olympic|"
+    r"espn|fox\s*sport|nbcsn|tnt\s*sport|sky\s*sport|bein|dazn|willow|"
+    r"flosport|"
+    r"horse\s*rac|darts|snooker|"
+    r"sec\+|acc\s*extra|big\s*ten|big12|pac-?12"
+    r")\b",
+    re.IGNORECASE,
+)
+
+DENY_RE = re.compile(
+    r"\b("
+    r"vod|movies?|cinema|hbo\s*movies?|"
+    r"series|tv\s*shows?|sitcoms?|drama|"
+    r"24/?7|"
+    r"kids|cartoons?|disney|nickelodeon|"
+    r"news|cnn|fox\s*news|msnbc|bbc\s*news|"
+    r"documentar|history\s*channel|nat\s*geo|"
+    r"music|mtv|vh1|radio|sirius|"
+    r"porn|xxx|adult|nsfw|playboy|"
+    r"religi|gospel|cooking|home\s*shop|qvc|hsn|"
+    r"weather|game\s*show|reality"
+    r")\b",
+    re.IGNORECASE,
+)
+
+
+def regex_classify(name: str) -> Optional[str]:
+    """Return 'pure_sports' / 'not_sports' if regex is decisive, else None."""
+    if DENY_RE.search(name) and not ALLOW_RE.search(name):
+        return "not_sports"
+    if ALLOW_RE.search(name):
+        if DENY_RE.search(name):
+            return None  # ambiguous, defer
+        return "pure_sports"
+    return None
+
+
+def _post_claude(api_key: str, model: str, system: str, user: str, timeout: int = 60) -> Optional[Dict[str, str]]:
+    """Single Claude API call. Returns parsed JSON dict or None on failure."""
+    body = json.dumps({
+        "model": model,
+        "max_tokens": 4096,
+        "system": system,
+        "messages": [{"role": "user", "content": user}],
+    }).encode("utf-8")
+    req = urllib.request.Request(
+        "https://api.anthropic.com/v1/messages",
+        data=body,
+        headers={
+            "content-type": "application/json",
+            "x-api-key": api_key,
+            "anthropic-version": "2023-06-01",
+        },
+        method="POST",
+    )
+    t0 = time.time()
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            raw = resp.read().decode("utf-8")
+    except Exception as e:
+        logger.error("[sports_filter] Claude API call failed: %s", e)
+        return None
+    elapsed = time.time() - t0
+    try:
+        data = json.loads(raw)
+        text = "".join(b.get("text", "") for b in data.get("content", []) if b.get("type") == "text")
+        parsed = _extract_json(text)
+        usage = data.get("usage", {})
+        logger.info(
+            "[sports_filter] Claude call %.1fs in=%s out=%s",
+            elapsed, usage.get("input_tokens"), usage.get("output_tokens"),
+        )
+        return parsed
+    except Exception as e:
+        logger.error("[sports_filter] Failed to parse Claude response: %s ; raw=%s", e, raw[:500])
+        return None
+
+
+def _extract_json(text: str) -> Dict[str, str]:
+    """Pull a JSON object out of model output, tolerant to fenced code blocks."""
+    text = text.strip()
+    if text.startswith("```"):
+        text = re.sub(r"^```(?:json)?\s*", "", text)
+        text = re.sub(r"\s*```\s*$", "", text)
+    start = text.find("{")
+    end = text.rfind("}")
+    if start >= 0 and end > start:
+        text = text[start : end + 1]
+    return json.loads(text)
+
+
+def _normalize_group_verdict(v: object) -> str:
+    s = str(v).lower().strip().replace("-", "_").replace(" ", "_")
+    if s in ("pure_sports", "puresports"):
+        return "pure_sports"
+    if s == "mixed":
+        return "mixed"
+    return "not_sports"
+
+
+def _normalize_stream_verdict(v: object) -> str:
+    s = str(v).lower().strip()
+    return "sports" if s == "sports" else "not_sports"
+
+
+# ----- Group-level classification (ternary) -----
+
+GROUP_SYSTEM_PROMPT = (
+    "You classify IPTV channel groups into one of three categories:\n"
+    "  - pure_sports: nearly every channel in the group is a sports channel "
+    "(live sports events, sports networks, sports-themed). Examples: NFL, NBA, "
+    "ESPN+, Sky Sports, F1, UFC, golf, tennis-only bouquets.\n"
+    "  - mixed: the group is a STREAMING SERVICE BOUQUET or REGIONAL PACK that "
+    "contains a mix of sports and non-sports channels. Examples: 'US | Peacock TV' "
+    "(has NFL Channel + Premier League TV alongside news / shows / movies), "
+    "'Sports | Paramount+', 'Sports | HBO Max US', 'Sports | Max'. Look at "
+    "sample_channels: if you see news, kids, lifestyle, talk shows mixed with "
+    "some sports -> 'mixed'.\n"
+    "  - not_sports: movies, VOD, series, news, kids, music, religious, adult, "
+    "regional general-entertainment bouquets (e.g. 'Colombia | TV'), "
+    "international/news/lifestyle channels with NO sports content.\n"
+    "Decision rule: if >90% of sample_channels look sports-related -> pure_sports. "
+    "If 10-90% sports -> mixed. If <10% sports -> not_sports.\n"
+    "Output ONLY a JSON object mapping each input group name to one of "
+    "'pure_sports', 'mixed', or 'not_sports'. No prose, no markdown."
+)
+
+
+def classify_groups_with_llm(
+    api_key: str,
+    model: str,
+    groups_with_samples: List[Tuple[str, List[str]]],
+    batch_size: int = 30,
+    timeout: int = 60,
+) -> Dict[str, str]:
+    """Classify (group_name, [sample_streams]) -> {group_name: pure_sports/mixed/not_sports}."""
+    out: Dict[str, str] = {}
+    if not groups_with_samples:
+        return out
+    for i in range(0, len(groups_with_samples), batch_size):
+        batch = groups_with_samples[i : i + batch_size]
+        payload = [{"group": n, "sample_channels": [s for s in samples[:10] if s]} for n, samples in batch]
+        user = "Classify each of these groups. Return JSON only.\n\n" + json.dumps(payload, ensure_ascii=False)
+        parsed = _post_claude(api_key, model, GROUP_SYSTEM_PROMPT, user, timeout) or {}
+        # Fail-closed: anything missing or unparseable defaults to not_sports
+        for name, _ in batch:
+            out[name] = _normalize_group_verdict(parsed.get(name, "not_sports"))
+    return out
+
+
+def classify_all_groups(
+    api_key: str,
+    model: str,
+    groups_with_samples: Iterable[Tuple[str, List[str]]],
+    cache: Dict[str, str],
+) -> Tuple[Dict[str, str], Dict[str, str]]:
+    """
+    Returns (results, new_only).
+      - results:  {group_name: 'pure_sports'|'mixed'|'not_sports'} for ALL inputs
+      - new_only: subset of results that were just classified this run
+    """
+    results: Dict[str, str] = {}
+    new_only: Dict[str, str] = {}
+    needs_llm: List[Tuple[str, List[str]]] = []
+
+    for name, samples in groups_with_samples:
+        if name in cache and cache[name] in ("pure_sports", "mixed", "not_sports"):
+            results[name] = cache[name]
+            continue
+        verdict = regex_classify(name)
+        if verdict:
+            results[name] = verdict
+            new_only[name] = verdict
+            continue
+        needs_llm.append((name, samples))
+
+    if needs_llm:
+        if not api_key:
+            logger.warning("[sports_filter] %d groups need LLM but no API key; defaulting to not_sports", len(needs_llm))
+            for name, _ in needs_llm:
+                results[name] = "not_sports"
+                new_only[name] = "not_sports"
+        else:
+            llm_results = classify_groups_with_llm(api_key, model, needs_llm)
+            for name, verdict in llm_results.items():
+                results[name] = verdict
+                new_only[name] = verdict
+
+    return results, new_only
+
+
+# ----- Stream-level classification (binary, for mixed groups) -----
+
+STREAM_SYSTEM_PROMPT = (
+    "You classify individual IPTV streams as either 'sports' or 'not_sports'.\n"
+    "Sports = live-sports, sports-network, league-dedicated, sports-talk, or "
+    "sports-themed channels (e.g. 'NFL Channel', 'Premier League TV', 'GolfPass', "
+    "'NBC Sports NOW', 'TEAM USA TV', 'F1 TV').\n"
+    "Not sports = news, kids, movies, lifestyle, music, religious, talk shows, "
+    "documentaries, reality, weather, shopping, regional/local TV, automotive "
+    "lifestyle (e.g. 'Top Gear' is car entertainment, not motorsport coverage), "
+    "general entertainment.\n"
+    "Each input has the stream name and (optionally) the group context. Use the "
+    "stream name as the primary signal; group context only helps disambiguate.\n"
+    "Output ONLY a JSON object mapping each input stream name to 'sports' or "
+    "'not_sports'. No prose, no markdown."
+)
+
+
+def classify_streams_with_llm(
+    api_key: str,
+    model: str,
+    streams_with_context: List[Tuple[str, str]],
+    batch_size: int = 50,
+    timeout: int = 60,
+) -> Dict[str, str]:
+    """Classify [(stream_name, group_context)] -> {stream_name: sports/not_sports}."""
+    out: Dict[str, str] = {}
+    if not streams_with_context:
+        return out
+    for i in range(0, len(streams_with_context), batch_size):
+        batch = streams_with_context[i : i + batch_size]
+        payload = [{"stream": n, "in_group": g} for n, g in batch]
+        user = "Classify each stream. Return JSON only.\n\n" + json.dumps(payload, ensure_ascii=False)
+        parsed = _post_claude(api_key, model, STREAM_SYSTEM_PROMPT, user, timeout) or {}
+        for name, _ in batch:
+            out[name] = _normalize_stream_verdict(parsed.get(name, "not_sports"))
+    return out

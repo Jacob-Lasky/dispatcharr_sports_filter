@@ -1,0 +1,127 @@
+{
+  "name": "Sports-Only Group Filter",
+  "version": "0.5.0",
+  "description": "3-bucket classifier (pure_sports/mixed/not_sports) + per-stream filter for mixed bouquets via name_match_regex + auto-rename source groups via group_override. Reads ANTHROPIC_API_KEY from <plugin_dir>/anthropic_api_key.",
+  "author": "Jake (with Claude)",
+  "license": "MIT",
+  "repo_url": "https://github.com/jacob-lasky/dispatcharr-sports-filter",
+  "help_url": "https://github.com/jacob-lasky/dispatcharr-sports-filter#readme",
+  "fields": [
+    {
+      "id": "m3u_account_id",
+      "type": "select",
+      "label": "M3U Account",
+      "default": "2",
+      "options": [],
+      "help_text": "Populated dynamically from the DB at plugin load. Restart Dispatcharr (or touch .reload_token) if you add a new M3U account."
+    },
+    {
+      "id": "channel_profile_id",
+      "type": "select",
+      "label": "Channel Profile for sports",
+      "default": "2",
+      "options": [],
+      "help_text": "Populated dynamically from the DB at plugin load."
+    },
+    {
+      "id": "model",
+      "type": "select",
+      "label": "Claude model",
+      "default": "claude-haiku-4-5",
+      "options": [
+        {"value": "claude-haiku-4-5", "label": "Claude Haiku 4.5 (cheap, fast)"},
+        {"value": "claude-sonnet-4-6", "label": "Claude Sonnet 4.6"},
+        {"value": "claude-opus-4-7", "label": "Claude Opus 4.7"}
+      ],
+      "help_text": "Model used for ambiguous classification."
+    },
+    {
+      "id": "samples_per_group",
+      "type": "number",
+      "label": "Sample channels per group",
+      "default": 6,
+      "help_text": "How many channel names to include per group as context for the LLM."
+    },
+    {
+      "id": "dry_run",
+      "type": "boolean",
+      "label": "Dry run on Apply",
+      "default": true,
+      "help_text": "When true, 'Apply' logs intended changes but does not write to the DB. Disable once you trust the output."
+    },
+    {
+      "id": "auto_pipeline_enabled",
+      "type": "boolean",
+      "label": "Daily auto-run pipeline",
+      "default": true,
+      "help_text": "If on, the plugin runs classify -> refine_mixed -> apply -> cleanup_orphans automatically once per day. Cache makes subsequent runs cheap; only new groups/streams hit the LLM."
+    },
+    {
+      "id": "auto_pipeline_hour",
+      "type": "number",
+      "label": "Daily run hour (0-23, server local time)",
+      "default": 3,
+      "help_text": "Hour of day (24h) the auto-pipeline fires. Default 3 = 3 AM."
+    },
+    {
+      "id": "auto_pipeline_minute",
+      "type": "number",
+      "label": "Daily run minute (0-59)",
+      "default": 0,
+      "help_text": "Minute of the hour the auto-pipeline fires."
+    },
+    {
+      "id": "apply_group_rename",
+      "type": "boolean",
+      "label": "Apply group rename (group_override) on Apply",
+      "default": true,
+      "help_text": "Strips 'Sports |' prefix from sports groups via Dispatcharr's built-in group_override. Auto-created channels go into the cleaner-named target group. Survives M3U refreshes."
+    },
+    {
+      "id": "also_unselect_not_sports",
+      "type": "boolean",
+      "label": "Also unselect not_sports groups",
+      "default": false,
+      "help_text": "Stronger than auto_channel_sync=False: also flips 'enabled' off, so the M3U import skips the group entirely. Warning: orphans existing channels that pull streams only from those groups."
+    },
+    {
+      "id": "debug_mode",
+      "type": "boolean",
+      "label": "Debug logging",
+      "default": false,
+      "help_text": "Verbose logging for troubleshooting."
+    }
+  ],
+  "actions": [
+    {
+      "id": "classify",
+      "label": "Classify groups (3-bucket)",
+      "description": "Read enabled groups, classify each as pure_sports / mixed / not_sports (regex + LLM, cached). Writes cache.json. No DB writes."
+    },
+    {
+      "id": "refine_mixed",
+      "label": "Refine mixed groups (per-stream)",
+      "description": "For groups marked 'mixed', classify each stream as sports/not_sports. Writes stream_cache.json. No DB writes."
+    },
+    {
+      "id": "apply",
+      "label": "Apply sports filter",
+      "description": "Toggle auto_channel_sync, set group_override, build name_match_regex from caches. Honors dry_run."
+    },
+    {
+      "id": "cleanup_orphans",
+      "label": "Cleanup orphan ChannelGroups",
+      "description": "Delete ChannelGroup rows that have no streams, no channels, no M3U links, and aren't referenced by any group_override. These are stale rename targets from older apply runs. Honors dry_run."
+    },
+    {
+      "id": "auto_pipeline",
+      "label": "Run full pipeline now",
+      "description": "Run classify -> refine_mixed -> apply (real) -> cleanup_orphans (real) end-to-end. The daily scheduler invokes this; this button lets you trigger it on demand."
+    },
+    {
+      "id": "show_status",
+      "label": "Show current state",
+      "description": "Print group cache + stream cache + account state. No writes, no LLM calls."
+    }
+  ]
+}
