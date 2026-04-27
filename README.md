@@ -101,7 +101,7 @@ group names and the noise stripped out.
 
 ## Tested against
 
-This plugin was developed against an AliceXC-style XC provider with `Sports |`
+This plugin was developed against an XC provider with `Sports |`
 naming conventions. It should work against any XC-style provider; behavior on
 Stalker portals, Xtream-only setups, or providers with very different naming
 conventions is unverified — start with `dry_run=true` and tune
