@@ -41,7 +41,6 @@ from datetime import datetime, timedelta
 from typing import Any, Callable, Dict, List, Optional
 
 from .constants import (
-    DEFAULT_ACCOUNT_ID,
     DEFAULT_MODEL,
     DEFAULT_PROFILE_ID,
     DEFAULT_SAMPLES_PER_GROUP,
@@ -57,7 +56,7 @@ from .constants import (
     VERDICT_SPORTS,
 )
 
-PLUGIN_VERSION = "0.7.0"
+PLUGIN_VERSION = "0.7.1"
 
 logger = logging.getLogger(LOGGER_NAME)
 
@@ -281,10 +280,16 @@ def _gather_streams_for_group(account_id: Optional[int], group_name: str) -> Lis
 
 # ---------- Settings helpers ----------
 
-def _apply_debug_logging(settings: Dict[str, Any]) -> None:
-    """Bump the plugin logger to DEBUG when the setting is on."""
-    if bool(settings.get("debug_mode", False)):
+def _apply_debug_logging(settings: Dict[str, Any]) -> bool:
+    """Bump the plugin logger to DEBUG when the setting is on. Returns the
+    debug flag so callers that need a local boolean for ad-hoc gating
+    (`if debug or X: logger.info(...)`) don't have to re-read the setting.
+    Single source of truth: read once here.
+    """
+    debug = bool(settings.get("debug_mode", False))
+    if debug:
         logging.getLogger(LOGGER_NAME).setLevel(logging.DEBUG)
+    return debug
 
 
 def _resolve_account_id(settings: Dict[str, Any]) -> Optional[int]:
@@ -316,7 +321,7 @@ def _resolve_model(settings: Dict[str, Any]) -> str:
 
 def _action_classify(settings: Dict[str, Any]) -> Dict[str, Any]:
     from . import classifier
-    _apply_debug_logging(settings)
+    debug = _apply_debug_logging(settings)
     account_id = _resolve_account_id(settings)
     model = _resolve_model(settings)
     samples_per_group = int(settings.get("samples_per_group", DEFAULT_SAMPLES_PER_GROUP))
@@ -485,7 +490,7 @@ def _action_refine_mixed(settings: Dict[str, Any]) -> Dict[str, Any]:
 def _action_apply(settings: Dict[str, Any]) -> Dict[str, Any]:
     from apps.channels.models import ChannelGroupM3UAccount
 
-    _apply_debug_logging(settings)
+    debug = _apply_debug_logging(settings)
     account_id = _resolve_account_id(settings)
     profile_id = _resolve_profile_id(settings)
     dry_run = bool(settings.get("dry_run", True))

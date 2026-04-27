@@ -2,6 +2,33 @@
 
 All notable changes to this plugin are documented here.
 
+## [0.7.1] — 2026-04-27 — auto_pipeline hotfix
+
+`auto_pipeline` errored at runtime with `NameError: name 'debug' is not
+defined` because the `debug` local variable was lifted into
+`_apply_debug_logging` in v0.5.x but two later references to it survived
+in `_action_classify` (the verbose mixed-groups dump) and `_action_apply`
+(the dry-run details dump). Existing unit tests didn't exercise either
+gated path so the bug never fired in CI.
+
+Fixes:
+
+- `_apply_debug_logging` now returns the debug flag, single source of
+  truth.
+- The two action sites that need a local `debug` variable capture the
+  return value: `debug = _apply_debug_logging(settings)`.
+- New contract test in `tests/test_plugin_helpers.py` runs `pyflakes`
+  against every Python file in the plugin and asserts a clean exit.
+  This catches any future undefined-name reference at unit-test time
+  rather than at user click time.
+- Removed an unused `DEFAULT_ACCOUNT_ID` import that pyflakes flagged
+  while it was at it.
+
+Live-verified by running the actual `auto_pipeline` action in
+regex-only + dry-run mode against the live container. All four stages
+(classify, refine_mixed, apply, cleanup_orphans) returned ok status with
+the expected messages.
+
 ## [0.7.0] — 2026-04-27 — LLM-free mode (now the default)
 
 Adds `enable_llm` boolean. **Default is now `false`** — fresh installs

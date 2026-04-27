@@ -209,6 +209,40 @@ def test_resolve_account_id_handles_all_sentinel_forms(raw, expected):
     assert plugin._resolve_account_id({"m3u_account_id": raw}) == expected
 
 
+def test_pyflakes_clean():
+    """Run pyflakes against every Python file in the plugin. Catches the
+    class of bug where a refactor removes a local variable but leaves a
+    later reference to it intact (e.g. `if debug or X:` after lifting
+    `debug = bool(settings.get(...))` into a helper). NameError fires only
+    when the gated path actually executes — unit tests that mock around
+    that branch miss it.
+
+    Real ship-blocker in v0.7.0: _action_classify and _action_apply both
+    referenced `debug` after the variable was lifted into
+    _apply_debug_logging. Auto-pipeline NameError'd in the UI. Pyflakes
+    would have flagged 'undefined name "debug"' immediately.
+    """
+    import os
+    import subprocess
+
+    here = os.path.dirname(os.path.abspath(__file__))
+    repo_root = os.path.dirname(here)
+    targets = [
+        os.path.join(repo_root, name)
+        for name in ("plugin.py", "classifier.py", "constants.py", "__init__.py")
+    ]
+    pyflakes = os.path.join(repo_root, ".venv", "bin", "pyflakes")
+    if not os.path.exists(pyflakes):
+        # Falls back to the system pyflakes if .venv isn't present (CI etc.).
+        pyflakes = "pyflakes"
+    result = subprocess.run(
+        [pyflakes, *targets], capture_output=True, text=True,
+    )
+    assert result.returncode == 0, (
+        f"pyflakes flagged issues:\n{result.stdout}\n{result.stderr}"
+    )
+
+
 def test_plugin_json_select_options_have_nonblank_values():
     """Dispatcharr's plugin loader rejects select option entries whose
     'value' is blank with 'apps.plugins.loader: Invalid plugin field entry

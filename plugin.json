@@ -1,6 +1,6 @@
 {
   "name": "Sports-Only Group Filter",
-  "version": "0.7.0",
+  "version": "0.7.1",
   "description": "3-bucket classifier (pure_sports/mixed/not_sports) + per-stream filter for mixed bouquets via name_match_regex + auto-rename source groups via group_override. Anthropic key configurable in settings, or via <plugin_dir>/anthropic_api_key on disk.",
   "author": "Jake (with Claude)",
   "license": "MIT",
