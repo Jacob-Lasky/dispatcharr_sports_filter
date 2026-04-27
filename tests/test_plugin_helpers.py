@@ -130,25 +130,72 @@ def test_read_group_cache_missing_file_returns_empty(tmp_path, monkeypatch):
 # ----- _read_api_key -----
 
 def test_read_api_key_settings_wins(tmp_path, monkeypatch):
-    """A non-empty settings field beats the on-disk file."""
+    """A non-empty settings field beats the on-disk file. Default provider
+    is anthropic for backward compatibility with the v0.8.x signature."""
     on_disk = tmp_path / "anthropic_api_key"
     on_disk.write_text("file-key")
-    monkeypatch.setattr(plugin, "API_KEY_PATH", str(on_disk))
+    monkeypatch.setattr(plugin, "PLUGIN_DIR", str(tmp_path))
     assert plugin._read_api_key({"anthropic_api_key": "ui-key"}) == "ui-key"
 
 
 def test_read_api_key_falls_back_to_disk(tmp_path, monkeypatch):
     on_disk = tmp_path / "anthropic_api_key"
     on_disk.write_text("file-key\n")
-    monkeypatch.setattr(plugin, "API_KEY_PATH", str(on_disk))
+    monkeypatch.setattr(plugin, "PLUGIN_DIR", str(tmp_path))
     assert plugin._read_api_key({"anthropic_api_key": ""}) == "file-key"
     assert plugin._read_api_key({}) == "file-key"
     assert plugin._read_api_key(None) == "file-key"
 
 
 def test_read_api_key_missing_returns_empty(tmp_path, monkeypatch):
-    monkeypatch.setattr(plugin, "API_KEY_PATH", str(tmp_path / "missing"))
+    monkeypatch.setattr(plugin, "PLUGIN_DIR", str(tmp_path))
     assert plugin._read_api_key({}) == ""
+
+
+# ----- _read_api_key per-provider -----
+
+@pytest.mark.parametrize(
+    "provider, field, filename",
+    [
+        ("anthropic", "anthropic_api_key", "anthropic_api_key"),
+        ("openai", "openai_api_key", "openai_api_key"),
+        ("gemini", "gemini_api_key", "gemini_api_key"),
+    ],
+)
+def test_read_api_key_per_provider_settings_field(provider, field, filename, tmp_path, monkeypatch):
+    """Each provider has its own settings field. Setting the field for one
+    provider must not leak into another provider's lookup."""
+    monkeypatch.setattr(plugin, "PLUGIN_DIR", str(tmp_path))
+    assert plugin._read_api_key({field: "key-from-ui"}, provider=provider) == "key-from-ui"
+    # Sibling provider's field shouldn't satisfy us.
+    other_field = "openai_api_key" if field != "openai_api_key" else "gemini_api_key"
+    assert plugin._read_api_key({other_field: "wrong-key"}, provider=provider) == ""
+
+
+@pytest.mark.parametrize(
+    "provider, filename",
+    [
+        ("anthropic", "anthropic_api_key"),
+        ("openai", "openai_api_key"),
+        ("gemini", "gemini_api_key"),
+    ],
+)
+def test_read_api_key_per_provider_disk_fallback(provider, filename, tmp_path, monkeypatch):
+    """File-fallback pattern is symmetric across providers — each provider
+    looks for <plugin_dir>/<provider>_api_key on disk when no settings field
+    is set."""
+    (tmp_path / filename).write_text(f"{provider}-disk-key\n")
+    monkeypatch.setattr(plugin, "PLUGIN_DIR", str(tmp_path))
+    assert plugin._read_api_key({}, provider=provider) == f"{provider}-disk-key"
+
+
+def test_read_api_key_unknown_provider_raises(tmp_path, monkeypatch):
+    """Unknown provider should raise loud rather than silently fall back to a
+    default. Otherwise a typo'd provider string would hide the bug behind a
+    return-empty-string."""
+    monkeypatch.setattr(plugin, "PLUGIN_DIR", str(tmp_path))
+    with pytest.raises(ValueError, match="unknown provider"):
+        plugin._read_api_key({}, provider="bogus")
 
 
 # ----- write_json round-trip -----
@@ -241,6 +288,86 @@ def test_pyflakes_clean():
     assert result.returncode == 0, (
         f"pyflakes flagged issues:\n{result.stdout}\n{result.stderr}"
     )
+
+
+def test_plugin_json_and_python_fields_agree_on_ids():
+    """Plugin.fields (Python-side) and plugin.json (static manifest) are
+    duplicate manifests by design — Plugin.fields exists so the loader can
+    inject DB-driven dropdown options that JSON cannot. The in-code comment
+    says they must stay in sync; this test pins the contract.
+
+    Drift is silent: a field present in only one source might or might not
+    surface depending on Dispatcharr's loader merge order. Pin against the
+    pre-v0.9.0 drift (anthropic_api_key was in plugin.json only) by
+    requiring exact set equality."""
+    import json
+    import os
+    here = os.path.dirname(os.path.abspath(__file__))
+    with open(os.path.join(here, "..", "plugin.json")) as f:
+        manifest = json.load(f)
+    json_ids = {f["id"] for f in manifest["fields"]}
+
+    p = plugin.Plugin.__new__(plugin.Plugin)
+    # Skip Plugin.__init__ side effects (DB queries for dropdown options) by
+    # cherry-picking the literal field list. We can't call __init__ in a
+    # Django-free test env. Read self.fields by introspecting the source.
+    src = open(os.path.join(here, "..", "plugin.py")).read()
+    py_ids = set(re.findall(r'"id":\s*"([a-z0-9_]+)"', src))
+    # Drop action ids — those are in self.actions, not self.fields.
+    action_ids = {"classify", "refine_mixed", "apply", "cleanup_orphans",
+                  "auto_pipeline", "show_status"}
+    py_ids -= action_ids
+
+    only_in_json = json_ids - py_ids
+    only_in_py = py_ids - json_ids
+    assert not only_in_json and not only_in_py, (
+        f"plugin.json and Plugin.fields drifted.\n"
+        f"  in plugin.json only: {sorted(only_in_json)}\n"
+        f"  in Plugin.fields only: {sorted(only_in_py)}"
+    )
+
+
+def test_plugin_json_has_per_provider_api_key_fields():
+    """v0.9.0 added OpenAI + Gemini key fields alongside the existing
+    Anthropic key field. All three must be present and masked, mirroring
+    the constants.PROVIDER_SETTINGS_FIELD map."""
+    import json
+    import os
+    from dispatcharr_sports_filter.constants import (
+        PROVIDER_SETTINGS_FIELD,
+        PROVIDERS,
+    )
+    here = os.path.dirname(os.path.abspath(__file__))
+    with open(os.path.join(here, "..", "plugin.json")) as f:
+        manifest = json.load(f)
+    fields_by_id = {f["id"]: f for f in manifest["fields"]}
+    for provider in PROVIDERS:
+        field_id = PROVIDER_SETTINGS_FIELD[provider]
+        assert field_id in fields_by_id, (
+            f"plugin.json missing API key field {field_id!r} for provider {provider!r}"
+        )
+        field = fields_by_id[field_id]
+        assert field.get("input_type") == "password", (
+            f"{field_id!r} must use input_type=password to mask the secret in the UI"
+        )
+
+
+def test_plugin_json_model_dropdown_covers_all_providers():
+    """The model dropdown must surface at least one option per provider — a
+    user shouldn't have to type a model ID by hand to use OpenAI or Gemini.
+    Verifies provider_for_model() recognizes every shipped option."""
+    import json
+    import os
+    from dispatcharr_sports_filter import classifier
+    from dispatcharr_sports_filter.constants import PROVIDERS
+    here = os.path.dirname(os.path.abspath(__file__))
+    with open(os.path.join(here, "..", "plugin.json")) as f:
+        manifest = json.load(f)
+    model_field = next(f for f in manifest["fields"] if f["id"] == "model")
+    seen_providers = {classifier.provider_for_model(opt["value"])
+                      for opt in model_field["options"]}
+    missing = PROVIDERS - seen_providers
+    assert not missing, f"Model dropdown has no option for providers: {missing}"
 
 
 def test_plugin_json_select_options_have_nonblank_values():

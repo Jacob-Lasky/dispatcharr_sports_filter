@@ -1,7 +1,7 @@
 {
   "name": "Sports-Only Group Filter",
-  "version": "0.8.0",
-  "description": "3-bucket classifier (pure_sports/mixed/not_sports) + per-stream filter for mixed bouquets via name_match_regex + auto-rename source groups via group_override. Anthropic key configurable in settings, or via <plugin_dir>/anthropic_api_key on disk.",
+  "version": "0.9.0",
+  "description": "3-bucket classifier (pure_sports/mixed/not_sports) + per-stream filter for mixed bouquets via name_match_regex + auto-rename source groups via group_override. Supports Anthropic / OpenAI / Google Gemini — provider is inferred from the chosen model. Each provider's key is configurable in settings or via <plugin_dir>/{anthropic,openai,gemini}_api_key on disk.",
   "author": "Jake (with Claude)",
   "license": "MIT",
   "repo_url": "https://github.com/Jacob-Lasky/dispatcharr_sports_filter",
@@ -31,19 +31,42 @@
       "input_type": "password",
       "label": "Anthropic API key",
       "default": "",
-      "help_text": "Masked in the UI. If blank, falls back to <plugin_dir>/anthropic_api_key on disk (chmod 600). Required for LLM classification of ambiguous groups + per-stream classification of mixed groups."
+      "help_text": "Masked in the UI. If blank, falls back to <plugin_dir>/anthropic_api_key on disk (chmod 600). Required when 'LLM model' is set to a Claude (claude-*) model."
+    },
+    {
+      "id": "openai_api_key",
+      "type": "string",
+      "input_type": "password",
+      "label": "OpenAI API key",
+      "default": "",
+      "help_text": "Masked in the UI. If blank, falls back to <plugin_dir>/openai_api_key on disk (chmod 600). Required when 'LLM model' is set to an OpenAI (gpt-*, o1-*, o3-*) model."
+    },
+    {
+      "id": "gemini_api_key",
+      "type": "string",
+      "input_type": "password",
+      "label": "Google Gemini API key",
+      "default": "",
+      "help_text": "Masked in the UI. If blank, falls back to <plugin_dir>/gemini_api_key on disk (chmod 600). Required when 'LLM model' is set to a Gemini (gemini-*) model."
     },
     {
       "id": "model",
       "type": "select",
-      "label": "Claude model",
+      "label": "LLM model",
       "default": "claude-haiku-4-5",
       "options": [
-        {"value": "claude-haiku-4-5", "label": "Claude Haiku 4.5 (cheap, fast)"},
-        {"value": "claude-sonnet-4-6", "label": "Claude Sonnet 4.6"},
-        {"value": "claude-opus-4-7", "label": "Claude Opus 4.7"}
+        {"value": "claude-haiku-4-5", "label": "Anthropic — Claude Haiku 4.5 (cheap, fast)"},
+        {"value": "claude-sonnet-4-6", "label": "Anthropic — Claude Sonnet 4.6"},
+        {"value": "claude-opus-4-7", "label": "Anthropic — Claude Opus 4.7"},
+        {"value": "gpt-4o-mini", "label": "OpenAI — GPT-4o mini (cheap, fast)"},
+        {"value": "gpt-4.1-mini", "label": "OpenAI — GPT-4.1 mini"},
+        {"value": "gpt-4.1", "label": "OpenAI — GPT-4.1"},
+        {"value": "gpt-4o", "label": "OpenAI — GPT-4o"},
+        {"value": "gemini-2.0-flash", "label": "Google — Gemini 2.0 Flash (cheap, fast)"},
+        {"value": "gemini-2.5-flash", "label": "Google — Gemini 2.5 Flash"},
+        {"value": "gemini-2.5-pro", "label": "Google — Gemini 2.5 Pro"}
       ],
-      "help_text": "Model used for ambiguous classification."
+      "help_text": "Provider is inferred from the model prefix: claude-* → Anthropic, gpt-* / o1-* / o3-* → OpenAI, gemini-* → Google. Make sure the matching API key field above is set."
     },
     {
       "id": "samples_per_group",
@@ -62,9 +85,9 @@
     {
       "id": "enable_llm",
       "type": "boolean",
-      "label": "Use LLM (Claude) for ambiguous classification",
+      "label": "Use LLM for ambiguous classification",
       "default": false,
-      "help_text": "OFF by default (regex-only mode): no Anthropic API key needed, no per-call cost, no third-party network traffic. Ambiguous group names default to 'not_sports'; tune via extra_allow_terms / extra_deny_terms. Turn ON to send ambiguous bouquets to Claude AND get per-stream classification of mixed bouquets — requires an Anthropic API key."
+      "help_text": "OFF by default (regex-only mode): no API key needed, no per-call cost, no third-party network traffic. Ambiguous group names default to 'not_sports'; tune via extra_allow_terms / extra_deny_terms. Turn ON to send ambiguous bouquets to the configured LLM (Anthropic / OpenAI / Google — pick via 'LLM model') AND get per-stream classification of mixed bouquets — requires the matching API key."
     },
     {
       "id": "extra_allow_terms",

@@ -6,7 +6,8 @@ plugin.json and the Plugin class self.version.
 
 Pipeline:
   1) classify        -> read enabled groups, classify each as
-                        pure_sports / mixed / not_sports (regex + Claude LLM).
+                        pure_sports / mixed / not_sports (regex + LLM —
+                        Anthropic / OpenAI / Google, picked by model prefix).
                         Writes cache.json. No DB writes.
   2) refine_mixed    -> for groups marked 'mixed', classify each stream within
                         the group as sports/not_sports. Writes stream_cache.json.
@@ -22,7 +23,10 @@ Pipeline:
 Files:
   - cache.json:        {group_name: 'pure_sports'|'mixed'|'not_sports'}
   - stream_cache.json: {stream_name: 'sports'|'not_sports'}
-  - anthropic_api_key: API key on disk (chmod 600)
+  - anthropic_api_key / openai_api_key / gemini_api_key:
+                       per-provider API key on disk (chmod 600). The plugin
+                       picks the file matching the chosen model's provider
+                       (claude-* -> anthropic, gpt-* -> openai, gemini-* -> gemini).
 
 Legacy v1 cache values ('sports' / 'not_sports' binary) — 'sports' entries are
 silently dropped on load so they re-flow through the ternary classifier; 'not_sports'
@@ -49,6 +53,9 @@ from .constants import (
     DEFAULT_STRIP_PREFIXES,
     GROUP_VERDICTS,
     LOGGER_NAME,
+    PROVIDER_KEY_FILE,
+    PROVIDER_SETTINGS_FIELD,
+    PROVIDERS,
     SCHEDULER_LOCK_KEY,
     SCHEDULER_LOCK_TTL_S,
     STREAM_VERDICTS,
@@ -58,32 +65,50 @@ from .constants import (
     VERDICT_SPORTS,
 )
 
-PLUGIN_VERSION = "0.8.0"
+PLUGIN_VERSION = "0.9.0"
 
 logger = logging.getLogger(LOGGER_NAME)
 
 PLUGIN_DIR = os.path.dirname(os.path.abspath(__file__))
 CACHE_PATH = os.path.join(PLUGIN_DIR, "cache.json")
 STREAM_CACHE_PATH = os.path.join(PLUGIN_DIR, "stream_cache.json")
-API_KEY_PATH = os.path.join(PLUGIN_DIR, "anthropic_api_key")
 
 
 # ---------- File helpers ----------
 
-def _read_api_key(settings: Optional[Dict[str, Any]] = None) -> str:
-    """Resolve the Anthropic API key. Settings field wins (typed in plugin UI,
-    masked input via input_type=password); falls back to <plugin_dir>/anthropic_api_key
-    on disk (chmod 600) for users who'd rather not paste the key into the DB.
+def _api_key_path(provider: str) -> str:
+    """Resolve the on-disk fallback path for a provider's API key. Wraps the
+    PLUGIN_DIR + filename join so tests can monkeypatch PLUGIN_DIR or the
+    PROVIDER_KEY_FILE map without each test re-deriving the path."""
+    if provider not in PROVIDERS:
+        raise ValueError(f"unknown provider: {provider!r}")
+    return os.path.join(PLUGIN_DIR, PROVIDER_KEY_FILE[provider])
+
+
+def _read_api_key(settings: Optional[Dict[str, Any]] = None, provider: str = "anthropic") -> str:
+    """Resolve the API key for a given LLM provider. Settings field wins (typed
+    in plugin UI, masked via input_type=password); falls back to
+    <plugin_dir>/<provider>_api_key on disk (chmod 600) for users who'd rather
+    not paste a key into the DB.
+
+    The on-disk pattern existed before multi-provider support landed. We
+    extend it symmetrically — `anthropic_api_key`, `openai_api_key`,
+    `gemini_api_key` — so a user with multiple providers configured can
+    switch models freely without re-entering keys in the UI.
     """
+    field_name = PROVIDER_SETTINGS_FIELD.get(provider)
+    if field_name is None:
+        raise ValueError(f"unknown provider: {provider!r}")
     if settings:
-        v = settings.get("anthropic_api_key") or ""
+        v = settings.get(field_name) or ""
         if isinstance(v, str) and v.strip():
             return v.strip()
+    path = _api_key_path(provider)
     try:
-        with open(API_KEY_PATH, "r", encoding="utf-8") as f:
+        with open(path, "r", encoding="utf-8") as f:
             return f.read().strip()
     except FileNotFoundError:
-        logger.warning("[sports_filter] No API key in settings nor at %s", API_KEY_PATH)
+        logger.warning("[sports_filter] No %s API key in settings nor at %s", provider, path)
         return ""
 
 
@@ -328,7 +353,11 @@ def _action_classify(settings: Dict[str, Any]) -> Dict[str, Any]:
     model = _resolve_model(settings)
     samples_per_group = int(settings.get("samples_per_group", DEFAULT_SAMPLES_PER_GROUP))
 
-    api_key = _read_api_key(settings)
+    # Provider is INFERRED from the model ID prefix; the key lookup picks the
+    # matching settings field + on-disk fallback. This keeps "switch model" =
+    # "switch provider" without a separate provider field that could drift.
+    provider = classifier.provider_for_model(model)
+    api_key = _read_api_key(settings, provider=provider)
     allow_extra_re = classifier.compile_user_terms(settings.get("extra_allow_terms", ""))
     deny_extra_re = classifier.compile_user_terms(settings.get("extra_deny_terms", ""))
     extra_hints = str(settings.get("extra_classification_hints", "") or "")
@@ -396,9 +425,13 @@ def _action_refine_mixed(settings: Dict[str, Any]) -> Dict[str, Any]:
         logger.info("[sports_filter] %s", msg)
         return {"status": "ok", "message": msg, "skipped": True, "mixed_groups": len(mixed_groups)}
 
-    api_key = _read_api_key(settings)
+    provider = classifier.provider_for_model(model)
+    api_key = _read_api_key(settings, provider=provider)
     if not api_key:
-        return {"status": "error", "message": "No API key on disk; can't classify streams."}
+        return {
+            "status": "error",
+            "message": f"No {provider} API key on disk; can't classify streams.",
+        }
 
     stream_cache = _read_stream_cache()
     needs_llm = []  # [(stream_name, group_context)]
@@ -1040,7 +1073,7 @@ class Plugin:
             "Three-bucket M3U group filter (pure_sports / mixed / not_sports). "
             "Per-stream filtering for mixed bouquets via name_match_regex. "
             "Auto-renames source groups via group_override. Regex pre-filter, "
-            "Claude LLM for ambiguous classification."
+            "Anthropic / OpenAI / Gemini LLM for ambiguous classification."
         )
         self.author = "Jake (with Claude)"
         self.url = _REPO_URL
@@ -1055,21 +1088,52 @@ class Plugin:
             _build_account_field(),
             _build_profile_field(),
             {
-                "id": "model", "type": "select", "label": "Claude model",
+                "id": "anthropic_api_key", "type": "string", "input_type": "password",
+                "label": "Anthropic API key", "default": "",
+                "help_text": "Masked in the UI. If blank, falls back to <plugin_dir>/anthropic_api_key on disk (chmod 600). Required when 'LLM model' is set to a Claude (claude-*) model.",
+            },
+            {
+                "id": "openai_api_key", "type": "string", "input_type": "password",
+                "label": "OpenAI API key", "default": "",
+                "help_text": "Masked in the UI. If blank, falls back to <plugin_dir>/openai_api_key on disk (chmod 600). Required when 'LLM model' is set to an OpenAI (gpt-*, o1-*, o3-*) model.",
+            },
+            {
+                "id": "gemini_api_key", "type": "string", "input_type": "password",
+                "label": "Google Gemini API key", "default": "",
+                "help_text": "Masked in the UI. If blank, falls back to <plugin_dir>/gemini_api_key on disk (chmod 600). Required when 'LLM model' is set to a Gemini (gemini-*) model.",
+            },
+            {
+                "id": "model", "type": "select", "label": "LLM model",
                 "default": DEFAULT_MODEL,
                 "options": [
-                    {"value": "claude-haiku-4-5", "label": "Claude Haiku 4.5 (cheap, fast)"},
-                    {"value": "claude-sonnet-4-6", "label": "Claude Sonnet 4.6"},
-                    {"value": "claude-opus-4-7", "label": "Claude Opus 4.7"},
+                    # Anthropic
+                    {"value": "claude-haiku-4-5", "label": "Anthropic — Claude Haiku 4.5 (cheap, fast)"},
+                    {"value": "claude-sonnet-4-6", "label": "Anthropic — Claude Sonnet 4.6"},
+                    {"value": "claude-opus-4-7", "label": "Anthropic — Claude Opus 4.7"},
+                    # OpenAI
+                    {"value": "gpt-4o-mini", "label": "OpenAI — GPT-4o mini (cheap, fast)"},
+                    {"value": "gpt-4.1-mini", "label": "OpenAI — GPT-4.1 mini"},
+                    {"value": "gpt-4.1", "label": "OpenAI — GPT-4.1"},
+                    {"value": "gpt-4o", "label": "OpenAI — GPT-4o"},
+                    # Google Gemini
+                    {"value": "gemini-2.0-flash", "label": "Google — Gemini 2.0 Flash (cheap, fast)"},
+                    {"value": "gemini-2.5-flash", "label": "Google — Gemini 2.5 Flash"},
+                    {"value": "gemini-2.5-pro", "label": "Google — Gemini 2.5 Pro"},
                 ],
+                "help_text": (
+                    "Provider is inferred from the model prefix: claude-* -> Anthropic, "
+                    "gpt-* / o1-* / o3-* -> OpenAI, gemini-* -> Google. Make sure the "
+                    "matching API key is configured (see anthropic_api_key / "
+                    "openai_api_key / gemini_api_key fields)."
+                ),
             },
             {"id": "samples_per_group", "type": "number", "label": "Sample channels per group", "default": DEFAULT_SAMPLES_PER_GROUP},
             {"id": "dry_run", "type": "boolean", "label": "Dry run on Apply", "default": True},
             {
                 "id": "enable_llm", "type": "boolean",
-                "label": "Use LLM (Claude) for ambiguous classification",
+                "label": "Use LLM for ambiguous classification",
                 "default": False,
-                "help_text": "OFF by default (regex-only mode): no Anthropic API key needed, no per-call cost, no third-party network traffic. Ambiguous group names default to 'not_sports'; tune via extra_allow_terms / extra_deny_terms. Turn ON to send ambiguous bouquets to Claude AND get per-stream classification of mixed bouquets — requires an Anthropic API key.",
+                "help_text": "OFF by default (regex-only mode): no API key needed, no per-call cost, no third-party network traffic. Ambiguous group names default to 'not_sports'; tune via extra_allow_terms / extra_deny_terms. Turn ON to send ambiguous bouquets to the configured LLM (Anthropic / OpenAI / Google — pick via 'LLM model') AND get per-stream classification of mixed bouquets — requires the matching API key.",
             },
             {
                 "id": "extra_allow_terms", "type": "string",

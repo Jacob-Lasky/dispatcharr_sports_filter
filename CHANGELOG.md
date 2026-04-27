@@ -2,6 +2,61 @@
 
 All notable changes to this plugin are documented here.
 
+## [0.9.0] — 2026-04-27 — multi-provider LLM support
+
+The plugin shipped Anthropic-only through 0.8.x. Users with an existing
+OpenAI or Gemini key had to sign up for Anthropic specifically just to
+get LLM smarts, which was a real adoption barrier for a public plugin.
+v0.9.0 lets users pick their provider via the model dropdown.
+
+### Field changes
+
+- **Added**: `openai_api_key` (password). Required when the chosen model
+  starts with `gpt-`, `o1-`, `o3-`, or `o4-`. Settings field wins; falls
+  back to `<plugin_dir>/openai_api_key` on disk (chmod 600).
+- **Added**: `gemini_api_key` (password). Required when the chosen
+  model starts with `gemini-`. Same settings + on-disk fallback pattern.
+- **Expanded**: `model` dropdown now lists Anthropic, OpenAI, and
+  Gemini options grouped by provider in the label. Field renamed from
+  "Claude model" to "LLM model".
+- **Renamed label**: `enable_llm` is now "Use LLM for ambiguous
+  classification" (was "Use LLM (Claude) for…"). Help text updated to
+  mention all three providers.
+
+### Mechanics
+
+- Provider is INFERRED from the model ID prefix
+  (`classifier.provider_for_model`) — there is no separate provider
+  field. This keeps "switch model" = "switch provider" and removes the
+  drift risk of a separate select that could disagree with the model.
+- `classifier._post_llm` replaces `_post_claude`. Internally dispatches
+  to one of three request builders (`_build_request`) and three
+  response parsers (`_parse_response`), one per provider. URL, auth
+  header (or query string for Gemini), and body shape all vary by
+  provider; the dispatcher hides those details from
+  `classify_groups_with_llm` / `classify_streams_with_llm`.
+- Stdlib `urllib.request` only — no SDK dependencies. Plugins should
+  not need pip installs in the Dispatcharr container.
+- Token-usage log line is uniform across providers:
+  `[sports_filter] <provider> call <elapsed>s in=<input_tokens> out=<output_tokens>`.
+- Failure mode unchanged: any network or parse error logs and returns
+  None; callers fail-closed to `not_sports` for every group in the
+  batch (existing v0.8.x contract).
+
+### Tests
+
+- 31 new tests in `tests/test_providers.py` covering provider
+  inference (every shipped model + case/whitespace tolerance + unknown
+  fallback), request shape per provider (URL, auth, body, system-prompt
+  placement), response parsing per provider (text + token counts +
+  empty-content edge cases), end-to-end dispatch with mocked urlopen,
+  fail-closed behavior on network/parse errors, and uniform log shape.
+- 6 new tests in `test_plugin_helpers.py` covering per-provider
+  `_read_api_key` (settings field + on-disk fallback for each
+  provider), unknown-provider raises, plus two contract tests pinning
+  that plugin.json has a password-masked key field per provider and
+  that the model dropdown surfaces at least one option per provider.
+
 ## [0.8.0] — 2026-04-27 — scheduler redesign
 
 The scheduler accepted only a single hour + minute. That made

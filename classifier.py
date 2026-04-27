@@ -25,12 +25,17 @@ import json
 import logging
 import re
 import time
+import urllib.parse
 import urllib.request
 from typing import Dict, Iterable, List, Optional, Tuple
 
 from .constants import (
     GROUP_VERDICTS,
     LOGGER_NAME,
+    MODEL_PREFIX_PROVIDER,
+    PROVIDER_ANTHROPIC,
+    PROVIDER_GEMINI,
+    PROVIDER_OPENAI,
     VERDICT_MIXED,
     VERDICT_NOT_SPORTS,
     VERDICT_PURE_SPORTS,
@@ -143,44 +148,145 @@ def regex_classify(
     return None
 
 
-def _post_claude(api_key: str, model: str, system: str, user: str, timeout: int = 60) -> Optional[Dict[str, str]]:
-    """Single Claude API call. Returns parsed JSON dict or None on failure."""
-    body = json.dumps({
-        "model": model,
-        "max_tokens": 4096,
-        "system": system,
-        "messages": [{"role": "user", "content": user}],
-    }).encode("utf-8")
-    req = urllib.request.Request(
-        "https://api.anthropic.com/v1/messages",
-        data=body,
-        headers={
-            "content-type": "application/json",
-            "x-api-key": api_key,
-            "anthropic-version": "2023-06-01",
-        },
-        method="POST",
-    )
+def provider_for_model(model: str) -> str:
+    """Infer provider from the model ID prefix. Falls back to Anthropic for
+    historical compatibility — the plugin shipped Anthropic-only through 0.8.x,
+    so an unrecognized prefix is more likely a Claude alias the prefix table
+    doesn't know about than a wholly new provider.
+    """
+    m = (model or "").lower().strip()
+    for prefix, provider in MODEL_PREFIX_PROVIDER:
+        if m.startswith(prefix):
+            return provider
+    return PROVIDER_ANTHROPIC
+
+
+def _build_request(provider: str, api_key: str, model: str, system: str, user: str) -> urllib.request.Request:
+    """Build the provider-specific HTTP request. Each branch below handles the
+    three things that vary across providers: URL, auth header, and body shape
+    (system-prompt placement in particular). Stdlib urllib only — keeping the
+    plugin pip-install-free is a deliberate constraint.
+    """
+    if provider == PROVIDER_ANTHROPIC:
+        body = json.dumps({
+            "model": model,
+            "max_tokens": 4096,
+            "system": system,
+            "messages": [{"role": "user", "content": user}],
+        }).encode("utf-8")
+        return urllib.request.Request(
+            "https://api.anthropic.com/v1/messages",
+            data=body,
+            headers={
+                "content-type": "application/json",
+                "x-api-key": api_key,
+                "anthropic-version": "2023-06-01",
+            },
+            method="POST",
+        )
+    if provider == PROVIDER_OPENAI:
+        body = json.dumps({
+            "model": model,
+            "max_tokens": 4096,
+            "response_format": {"type": "json_object"},
+            "messages": [
+                {"role": "system", "content": system},
+                {"role": "user", "content": user},
+            ],
+        }).encode("utf-8")
+        return urllib.request.Request(
+            "https://api.openai.com/v1/chat/completions",
+            data=body,
+            headers={
+                "content-type": "application/json",
+                "authorization": f"Bearer {api_key}",
+            },
+            method="POST",
+        )
+    if provider == PROVIDER_GEMINI:
+        # Gemini auth is via query string ?key=, NOT a header. Path includes
+        # the model ID. systemInstruction is a top-level peer of contents,
+        # not a message role.
+        body = json.dumps({
+            "systemInstruction": {"parts": [{"text": system}]},
+            "contents": [{"role": "user", "parts": [{"text": user}]}],
+            "generationConfig": {
+                "maxOutputTokens": 4096,
+                "responseMimeType": "application/json",
+            },
+        }).encode("utf-8")
+        url = (
+            f"https://generativelanguage.googleapis.com/v1beta/models/"
+            f"{urllib.parse.quote(model, safe='')}:generateContent?key={urllib.parse.quote(api_key, safe='')}"
+        )
+        return urllib.request.Request(
+            url,
+            data=body,
+            headers={"content-type": "application/json"},
+            method="POST",
+        )
+    raise ValueError(f"unknown provider: {provider!r}")
+
+
+def _parse_response(provider: str, raw: str) -> Tuple[str, Optional[int], Optional[int]]:
+    """Decode a provider response into (text, input_tokens, output_tokens).
+    text is the raw model-output string (still needs _extract_json to find the
+    JSON object); token counts are best-effort — a provider that omits usage
+    metadata yields (None, None) and the log line just shows in=None out=None.
+    """
+    data = json.loads(raw)
+    if provider == PROVIDER_ANTHROPIC:
+        text = "".join(
+            b.get("text", "") for b in data.get("content", []) if b.get("type") == "text"
+        )
+        usage = data.get("usage", {})
+        return text, usage.get("input_tokens"), usage.get("output_tokens")
+    if provider == PROVIDER_OPENAI:
+        choices = data.get("choices") or []
+        text = (choices[0].get("message", {}) or {}).get("content", "") if choices else ""
+        usage = data.get("usage", {})
+        return text, usage.get("prompt_tokens"), usage.get("completion_tokens")
+    if provider == PROVIDER_GEMINI:
+        cands = data.get("candidates") or []
+        if cands:
+            parts = (cands[0].get("content", {}) or {}).get("parts", []) or []
+            text = "".join(p.get("text", "") for p in parts)
+        else:
+            text = ""
+        usage = data.get("usageMetadata", {})
+        return text, usage.get("promptTokenCount"), usage.get("candidatesTokenCount")
+    raise ValueError(f"unknown provider: {provider!r}")
+
+
+def _post_llm(api_key: str, model: str, system: str, user: str, timeout: int = 60) -> Optional[Dict[str, str]]:
+    """Single LLM call dispatching to the right provider based on the model
+    prefix. Returns parsed JSON dict (the model's verdict mapping) or None on
+    any network/parse failure. Failure is logged but not raised — callers
+    fail-closed to not_sports for any group the LLM didn't return.
+    """
+    provider = provider_for_model(model)
+    req = _build_request(provider, api_key, model, system, user)
     t0 = time.time()
     try:
         with urllib.request.urlopen(req, timeout=timeout) as resp:
             raw = resp.read().decode("utf-8")
     except Exception as e:
-        logger.error("[sports_filter] Claude API call failed: %s", e)
+        logger.error("[sports_filter] %s API call failed: %s", provider, e)
         return None
     elapsed = time.time() - t0
     try:
-        data = json.loads(raw)
-        text = "".join(b.get("text", "") for b in data.get("content", []) if b.get("type") == "text")
+        text, in_tokens, out_tokens = _parse_response(provider, raw)
         parsed = _extract_json(text)
-        usage = data.get("usage", {})
         logger.info(
-            "[sports_filter] Claude call %.1fs in=%s out=%s",
-            elapsed, usage.get("input_tokens"), usage.get("output_tokens"),
+            "[sports_filter] %s call %.1fs in=%s out=%s",
+            provider, elapsed, in_tokens, out_tokens,
         )
         return parsed
     except Exception as e:
-        logger.error("[sports_filter] Failed to parse Claude response: %s ; raw=%s", e, raw[:500])
+        logger.error(
+            "[sports_filter] Failed to parse %s response: %s ; raw=%s",
+            provider, e, raw[:500],
+        )
         return None
 
 
@@ -258,7 +364,7 @@ def classify_groups_with_llm(
         batch = groups_with_samples[i : i + batch_size]
         payload = [{"group": n, "sample_channels": [s for s in samples[:10] if s]} for n, samples in batch]
         user = "Classify each of these groups. Return JSON only.\n\n" + json.dumps(payload, ensure_ascii=False)
-        parsed = _post_claude(api_key, model, system_prompt, user, timeout) or {}
+        parsed = _post_llm(api_key, model, system_prompt, user, timeout) or {}
         # Fail-closed: anything missing or unparseable defaults to not_sports
         for name, _ in batch:
             out[name] = _normalize_group_verdict(parsed.get(name, VERDICT_NOT_SPORTS))
@@ -368,7 +474,7 @@ def classify_streams_with_llm(
         batch = streams_with_context[i : i + batch_size]
         payload = [{"stream": n, "in_group": g} for n, g in batch]
         user = "Classify each stream. Return JSON only.\n\n" + json.dumps(payload, ensure_ascii=False)
-        parsed = _post_claude(api_key, model, system_prompt, user, timeout) or {}
+        parsed = _post_llm(api_key, model, system_prompt, user, timeout) or {}
         for name, _ in batch:
             out[name] = _normalize_stream_verdict(parsed.get(name, VERDICT_NOT_SPORTS))
     return out

@@ -1,9 +1,9 @@
 # Dispatcharr Sports-Only Group Filter
 
 A [Dispatcharr](https://github.com/dispatcharr/dispatcharr) plugin that uses
-regex + Claude (Anthropic) to classify M3U channel groups as `pure_sports`,
-`mixed`, or `not_sports`, then prunes your IPTV setup to surface only sports
-content.
+regex + an LLM (Anthropic Claude, OpenAI, or Google Gemini — your choice) to
+classify M3U channel groups as `pure_sports`, `mixed`, or `not_sports`, then
+prunes your IPTV setup to surface only sports content.
 
 If your provider ships a giant M3U with bouquets like `Sports | NFL`,
 `Sports | Peacock TV` (mixed sports + entertainment), `Movies | HBO Max`,
@@ -41,18 +41,31 @@ group names and the noise stripped out.
        /data/plugins/dispatcharr_sports_filter
    ```
 
-2. Stage your Anthropic API key:
+2. (Optional, only if `enable_llm=true`) stage an API key for the provider
+   matching your chosen model. Pick **one** of:
 
    ```bash
+   # Anthropic — for claude-* models
    docker exec dispatcharr sh -c 'echo "sk-ant-..." > /data/plugins/dispatcharr_sports_filter/anthropic_api_key && chmod 600 /data/plugins/dispatcharr_sports_filter/anthropic_api_key'
+
+   # OpenAI — for gpt-* / o1-* / o3-* / o4-* models
+   docker exec dispatcharr sh -c 'echo "sk-..." > /data/plugins/dispatcharr_sports_filter/openai_api_key && chmod 600 /data/plugins/dispatcharr_sports_filter/openai_api_key'
+
+   # Google — for gemini-* models
+   docker exec dispatcharr sh -c 'echo "AIza..." > /data/plugins/dispatcharr_sports_filter/gemini_api_key && chmod 600 /data/plugins/dispatcharr_sports_filter/gemini_api_key'
    ```
+
+   Or paste the key into the matching settings field in the plugin UI
+   (masked input). The plugin uses the file fallback if the field is blank.
 
 3. Open Dispatcharr → Plugins → enable **Sports-Only Group Filter**, configure:
    - **M3U Account** — which provider's groups to classify
    - **Channel Profile for sports** — assigned to `pure_sports` and `mixed`
      groups so the channels they spawn land in your sports profile
-   - **Claude model** — Haiku 4.5 is fast + cheap; Sonnet for ambiguous edge
-     cases
+   - **LLM model** — provider is inferred from the model prefix
+     (`claude-*` → Anthropic, `gpt-*` / `o*-*` → OpenAI, `gemini-*` →
+     Google). Haiku 4.5 / GPT-4o mini / Gemini 2.0 Flash are the cheap+fast
+     defaults across providers.
 
 4. Run **Classify groups (3-bucket)** → review `cache.json` → run **Refine
    mixed groups (per-stream)** → review `stream_cache.json` → run **Apply
@@ -70,13 +83,19 @@ group names and the noise stripped out.
 
 ## Settings (highlights)
 
-- `enable_llm` — **off by default (regex-only mode).** No Anthropic API
-  key needed, no per-call cost, no third-party network calls. Ambiguous
+- `enable_llm` — **off by default (regex-only mode).** No API key
+  needed, no per-call cost, no third-party network calls. Ambiguous
   group names default to `not_sports` and the `Refine mixed groups`
   action becomes a no-op; tune via `extra_allow_terms` /
-  `extra_deny_terms`. Turn ON to send ambiguous bouquets to Claude AND
-  unlock per-stream classification of `mixed` bouquets — requires an
-  Anthropic API key.
+  `extra_deny_terms`. Turn ON to send ambiguous bouquets to the chosen
+  LLM AND unlock per-stream classification of `mixed` bouquets —
+  requires the API key matching the model's provider.
+- `model` + `anthropic_api_key` / `openai_api_key` / `gemini_api_key` —
+  pick any model from the dropdown; provider is inferred from the model
+  prefix (`claude-*` → Anthropic, `gpt-*` / `o1-*` / `o3-*` / `o4-*` →
+  OpenAI, `gemini-*` → Google). The plugin reads the key field
+  matching the provider, or the on-disk file (`<plugin_dir>/<provider>_api_key`)
+  if the field is blank.
 - `samples_per_group` — how many channel names from a group to send to the
   LLM as classification context (default 6).
 - `extra_allow_terms` / `extra_deny_terms` — comma- or newline-separated
