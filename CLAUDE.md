@@ -82,34 +82,15 @@ Source of truth for version: `PLUGIN_VERSION` in `plugin.py`; mirrored in
 - M3U scope defaults to "All accounts" (sentinel `"0"` because Dispatcharr's plugin-field serializer rejects blank select-option values; pinned by a contract test)
 - Constants module (`constants.py`) carries the verdict wire strings + defaults; do NOT spell `"pure_sports"` etc. as literals in code
 
-**Known limitations:**
-- LLM verdict not always right for ambiguous bouquets. Caching makes re-runs cheap but a wrong verdict sticks until cache is manually cleared, OR until the user adds a term to `extra_deny_terms` for new cache entries (existing cached entries still need a manual edit). There's no UI for editing the cache.
-- The `(N)` regex assumes consistent integer ordering; doesn't handle `NBA (Backup)`, `[1080p]`, etc.
-- `cleanup_orphans` is conservative — won't delete groups that have any FK references at all, so dead groups with stale `name_match_regex` references stick around.
-- The favorites system is in `dispatcharr_ranked_matchups`, not here. This plugin is purely classify+filter.
-
 **Watch out for:**
 - Three silently-dead built-in regex tokens have been fixed across 0.5.1/0.6.0 (`documentar`, `religi`, `flosport`/`sky/fox/tnt sport`, `sec\+`). All shared the same root cause: `\b` cannot anchor between two word chars or between two non-word chars. If you add a new term to ALLOW_RE/DENY_RE, pick the right anchor: `(y|ies)?` style explicit suffixes for word-char tails, `(?!\w)` for terms ending in a non-word char like `+`. There's a regression test for `sec+` in `tests/test_classifier.py`; add similar pins for any new edge cases.
+- The favorites system is in `dispatcharr_ranked_matchups`, not here. This plugin is purely classify+filter.
 
-## Ideas / TODO (rough priority)
+## Open work
 
-1. **Cache editor UI** — let the user override a verdict directly in the
-   plugin UI (e.g., flip "Sports | FloSports" from pure_sports to not_sports)
-   without manually editing `cache.json`. The user has done this twice
-   already (FloSports demotion, etc.) and it's awkward.
-2. **Per-group verdict reason** — alongside the verdict, store the LLM's
-   reasoning so when the user sees a wrong verdict they understand why.
-3. **Backwards-compat for legacy v1 binary cache** — currently legacy
-   `'sports'` (binary) entries are silently dropped on load. Maybe migrate
-   them rather than re-classify.
-4. **Better DENY_RE for VOD-style streams** — provider VOD entries with
-   "Sports" in the title (e.g., "Sports Documentaries") sometimes
-   misclassify as pure_sports.
-5. **Plugin-side rate limiting** — currently the LLM batched call is one
-   blocking request; a slow Anthropic API can hold up apply for minutes.
-   Worth chunking.
-6. **Hook into cleanup_orphans for orphaned regex targets** — if a clean
-   target group's regex no longer matches any streams, it's orphaned.
+Known limitations and TODOs are tracked as GitHub issues, not in this
+file. Browse the open backlog:
+https://github.com/Jacob-Lasky/dispatcharr_sports_filter/issues
 
 ## Plugin distribution
 
