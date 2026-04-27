@@ -64,6 +64,10 @@ own M3U-import code reads these on every refresh, so renames + filters
 
 ## Development loop (Jake's tower)
 
+Two deploy flows depending on where the dev session is running.
+
+### From Jake's laptop (rsync + ssh)
+
 The user keeps source in `/home/jlasky/Code/dispatcharr_sports_filter/` on his
 laptop and deploys via:
 
@@ -72,11 +76,54 @@ laptop and deploys via:
 rsync -avz /home/jlasky/Code/dispatcharr_sports_filter/ \
     tower:/tmp/dispatcharr_sports_filter/
 
-# Copy into Dispatcharr container
+# Copy into Dispatcharr container (the WHOLE directory at once - safe,
+# no docker-cp-multi-source trap because we are copying ONE directory)
 ssh tower 'docker cp /tmp/dispatcharr_sports_filter Dispatcharr:/data/plugins/'
 ```
 
-Run an action programmatically (after edits):
+### From pocket-dev (Claude with docker socket mounted)
+
+When Claude is running inside the pocket-dev container on tower, the
+deploy is a series of `docker cp` calls directly against the host docker
+socket. **Beware the silent multi-source failure:**
+
+> **DO NOT** write `docker cp file1.py file2.py Dispatcharr:/data/plugins/sports_filter/`.
+> `docker cp` accepts exactly ONE source path. With two source args it
+> silently does the wrong thing (copies one file, errors quietly, OR
+> interprets the second arg as the destination — depending on the docker
+> client). The deploy looks successful but the second file never lands.
+> The previous pycache then loads the OLD code, and a "verified live"
+> probe runs against stale bytecode while reporting STATUS: ok.
+>
+> **Caught this in v0.8.0 sr-dev-review** — claimed live verification
+> on a refactor that introduced a new `DEFAULT_SCHEDULE_STRING` import,
+> but `constants.py` never deployed. The probe ran the previous version
+> from `__pycache__/constants.cpython-313.pyc` and returned ok.
+
+Safe pattern: one `docker cp` per file, then nuke pycache, then verify
+the new symbol actually landed:
+
+```bash
+cd /tmp/dispatcharr_sports_filter
+docker cp plugin.py    Dispatcharr:/data/plugins/dispatcharr_sports_filter/plugin.py
+docker cp classifier.py Dispatcharr:/data/plugins/dispatcharr_sports_filter/classifier.py
+docker cp constants.py Dispatcharr:/data/plugins/dispatcharr_sports_filter/constants.py
+docker cp plugin.json  Dispatcharr:/data/plugins/dispatcharr_sports_filter/plugin.json
+docker cp __init__.py  Dispatcharr:/data/plugins/dispatcharr_sports_filter/__init__.py
+docker exec Dispatcharr chown -R dispatch:dispatch /data/plugins/dispatcharr_sports_filter/
+docker exec Dispatcharr rm -rf /data/plugins/dispatcharr_sports_filter/__pycache__
+
+# Verify deploy landed before claiming live verification:
+docker exec Dispatcharr grep -c '<some-new-symbol>' /data/plugins/dispatcharr_sports_filter/<file>.py
+```
+
+The grep step is non-optional. If the new symbol count is 0, the deploy
+did not land. Always verify BEFORE running the live probe and BEFORE
+writing "live-verified" in a commit message.
+
+### Run an action programmatically (after edits)
+
+From the laptop:
 
 ```bash
 ssh tower 'docker exec Dispatcharr python -c "
@@ -92,10 +139,29 @@ print(r.get(\"message\", r))
 "'
 ```
 
+From pocket-dev: drop the `ssh tower` wrapper since you have direct
+access to the docker socket:
+
+```bash
+docker exec Dispatcharr python -c "
+import django, os, sys
+sys.path.insert(0, '/app')
+os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'dispatcharr.settings')
+django.setup()
+from apps.plugins.loader import PluginManager
+pm = PluginManager.get()
+pm.discover_plugins(sync_db=False, force_reload=True, use_cache=False)
+r = pm.run_action('dispatcharr_sports_filter', 'show_status', {})
+print(r.get('message', r))
+"
+```
+
 Read live logs:
 
 ```bash
 ssh tower 'docker logs --since 5m Dispatcharr 2>&1 | grep sports_filter | tail -30'
+# or from pocket-dev:
+docker logs --since 5m Dispatcharr 2>&1 | grep sports_filter | tail -30
 ```
 
 ## Current state (v0.6.0, 2026-04-27)
