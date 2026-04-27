@@ -209,6 +209,27 @@ def test_resolve_account_id_handles_all_sentinel_forms(raw, expected):
     assert plugin._resolve_account_id({"m3u_account_id": raw}) == expected
 
 
+def test_plugin_json_select_options_have_nonblank_values():
+    """Dispatcharr's plugin loader rejects select option entries whose
+    'value' is blank with 'apps.plugins.loader: Invalid plugin field entry
+    ignored' — silently dropping the WHOLE field. Caught in live integration
+    when the all-accounts sentinel was first set to ''. Pin the contract so
+    this regresses loud."""
+    import json
+    import os
+    here = os.path.dirname(os.path.abspath(__file__))
+    with open(os.path.join(here, "..", "plugin.json")) as f:
+        manifest = json.load(f)
+    for field in manifest["fields"]:
+        if field.get("type") != "select":
+            continue
+        for opt in field.get("options", []):
+            assert opt.get("value") not in (None, ""), (
+                f"Field {field['id']!r} has a select option with blank "
+                f"value: {opt!r}. Dispatcharr will drop the field."
+            )
+
+
 def test_resolve_model_default():
     from dispatcharr_sports_filter.constants import DEFAULT_MODEL
     assert plugin._resolve_model({}) == DEFAULT_MODEL

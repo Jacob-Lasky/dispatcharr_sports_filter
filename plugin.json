@@ -11,9 +11,9 @@
       "id": "m3u_account_id",
       "type": "select",
       "label": "M3U Account scope",
-      "default": "",
+      "default": "0",
       "options": [
-        {"value": "", "label": "All M3U accounts"}
+        {"value": "0", "label": "All M3U accounts"}
       ],
       "help_text": "Default 'All M3U accounts' classifies + applies across every enabled provider. Pick a single account only to scope the plugin to one provider. Populated dynamically from the DB at plugin load — restart Dispatcharr if you add a new M3U account."
     },

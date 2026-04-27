@@ -868,10 +868,12 @@ def _stop_scheduler() -> None:
 # ---------- Plugin shell ----------
 
 def _build_account_field():
-    """Build the m3u_account_id field. Default is 'all' (empty value), which
-    classifies + applies across every enabled M3U account. Users with multiple
-    providers who want to scope the plugin to one of them pick from the list."""
-    all_option = {"value": "", "label": "All M3U accounts"}
+    """Build the m3u_account_id field. Default '0' is the all-accounts sentinel
+    (no real M3UAccount has id=0). Cannot use empty string as the sentinel
+    because Dispatcharr's plugin-field serializer rejects select options with
+    a blank value ('apps.plugins.loader: Invalid plugin field entry ignored').
+    """
+    all_option = {"value": "0", "label": "All M3U accounts"}
     try:
         from apps.m3u.models import M3UAccount
         accounts = list(M3UAccount.objects.all().order_by("id"))
@@ -881,18 +883,17 @@ def _build_account_field():
             ]
             return {
                 "id": "m3u_account_id", "type": "select", "label": "M3U Account scope",
-                "default": "", "options": options,
+                "default": "0", "options": options,
                 "help_text": "Which M3U accounts to classify + apply against. Default 'All M3U accounts' covers every enabled provider; pick a single account only if you want to scope the plugin to one provider.",
             }
     except Exception as e:
         logger.warning("[sports_filter] Could not query M3UAccount for dropdown: %s", e)
     # Django unavailable (e.g. settings preview before db is reachable). Fall
-    # back to a free-form string so the user can still type an account id, or
-    # leave blank for 'all'.
+    # back to a free-form string. '0' = all; any positive int = scoped.
     return {
         "id": "m3u_account_id", "type": "string", "label": "M3U Account scope",
-        "default": "",
-        "help_text": "Database ID of the M3U account, or blank for 'all enabled M3U accounts'.",
+        "default": "0",
+        "help_text": "Database ID of the M3U account, or '0' for 'all enabled M3U accounts'.",
     }
 
 
