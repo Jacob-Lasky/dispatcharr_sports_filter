@@ -20,10 +20,16 @@ STREAM_VERDICTS = frozenset({VERDICT_SPORTS, VERDICT_NOT_SPORTS})
 
 # Settings defaults. plugin.json carries the same values for the static manifest;
 # code paths read these so a tower with no PluginConfig row still behaves.
-DEFAULT_ACCOUNT_ID = 2
-DEFAULT_PROFILE_ID = 2
+DEFAULT_ACCOUNT_ID = 1
+DEFAULT_PROFILE_ID = 1
 DEFAULT_MODEL = "claude-haiku-4-5"
 DEFAULT_SAMPLES_PER_GROUP = 6
+
+# Default group-name prefixes to strip when rebuilding clean target names.
+# Provider-specific. Public users override via the group_rename_strip_prefixes
+# setting (comma-separated). The literal "Sports |" / "Sports/" forms are
+# AliceXC-style; other providers use "SP-", "SPRT|", etc.
+DEFAULT_STRIP_PREFIXES = ("Sports |", "Sports/")
 
 # Cross-worker scheduler lock (Redis SET NX EX).
 SCHEDULER_LOCK_KEY = "plugins:sports_filter:auto_pipeline:lock"

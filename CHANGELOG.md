@@ -2,6 +2,64 @@
 
 All notable changes to this plugin are documented here.
 
+## [0.6.0] — 2026-04-27 — public-plugin generalization
+
+This release decouples the plugin from Jake's specific M3U provider, taste,
+and Dispatcharr install so it can be installed by anyone.
+
+### New settings
+
+- `extra_allow_terms` — comma- or newline-separated keywords OR'd into the
+  built-in ALLOW regex. Promote niche sports the built-in list does not
+  cover (e.g. `padel, lacrosse, beach volleyball`).
+- `extra_deny_terms` — same shape, OR'd into the built-in DENY regex.
+  Demote things you do not want treated as sports (e.g.
+  `flosports, darts, snooker`). User deny terms beat the built-in allow
+  via the existing "ambiguous → defer" rule, so you no longer need to
+  manually edit `cache.json`.
+- `extra_classification_hints` — free-text appended to the Claude system
+  prompt for borderline cases the regex layer cannot resolve.
+- `group_rename_strip_prefixes` — comma-separated list of prefixes to drop
+  from group names when building cleaner target groups. Default
+  `Sports |, Sports/` matches AliceXC; other providers can override with
+  `SP-`, `SPRT|`, etc. Empty disables prefix stripping entirely.
+- `mixed_groups_sports_suffix` — toggle the forced ` Sports` suffix on
+  mixed-bouquet target names. Default `true` matches prior behavior.
+
+### Behavior changes (read before upgrading)
+
+- **`auto_pipeline_enabled` now defaults to `false`.** Existing installs
+  with the field saved as `true` are unaffected; new installs must
+  explicitly opt in. Rationale: a fresh public install should not run
+  potentially-destructive scheduled DB writes at 3 AM before the user has
+  reviewed dry-runs.
+- **`_action_auto_pipeline` no longer silently sets
+  `also_unselect_not_sports=True` and `apply_group_rename=True`** when the
+  user has not configured them. The daily run now respects the field
+  defaults exactly. If you relied on the old aggressive-by-default
+  behavior, set both fields explicitly to `true` in plugin settings.
+- The `2`-as-default fallback for `m3u_account_id` and `channel_profile_id`
+  in `plugin.json` is now `1` — it was a stale leftover from Jake's
+  install. The dynamic dropdown still picks the right account/profile at
+  runtime, so this only affects the rendered form on a brand-new
+  installation before the dropdown loads.
+
+### Bug fixes
+
+- `sec\+` was a third silently-dead built-in regex token. The trailing `\b`
+  anchor never matches at end-of-string after a literal `+` because `+` is
+  not a word char. Replaced with `(?!\w)`. Same trap as the
+  `documentar` / `religi` / `sky\s*sport` etc. fixes in 0.5.1, just at the
+  trailing end. The user-terms compiler uses the same fix so user-supplied
+  terms like `sec+` work too.
+
+### Tests
+
+- Added `tests/test_user_extensions.py` (26 tests) covering the new
+  settings end-to-end: term parsing, regex-escape behavior at metachars,
+  word-boundary anchoring, prompt augmentation, custom prefix stripping,
+  and the public-plugin demote-FloSports flow.
+
 ## [0.5.1] — 2026-04-27
 
 - Fix six dead regex tokens in classifier pre-filter (`sky\s*sport`,

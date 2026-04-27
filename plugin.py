@@ -45,6 +45,7 @@ from .constants import (
     DEFAULT_MODEL,
     DEFAULT_PROFILE_ID,
     DEFAULT_SAMPLES_PER_GROUP,
+    DEFAULT_STRIP_PREFIXES,
     GROUP_VERDICTS,
     LOGGER_NAME,
     SCHEDULER_LOCK_KEY,
@@ -56,7 +57,7 @@ from .constants import (
     VERDICT_SPORTS,
 )
 
-PLUGIN_VERSION = "0.5.0"
+PLUGIN_VERSION = "0.6.0"
 
 logger = logging.getLogger(LOGGER_NAME)
 
@@ -116,10 +117,35 @@ def _read_stream_cache() -> Dict[str, str]:
 
 # ---------- Group rename helpers ----------
 
-def _clean_target_name(group_name: str, is_mixed: bool = False) -> str:
+def _parse_strip_prefixes(raw: Optional[str]) -> List[str]:
+    """Parse the comma- or newline-separated strip_prefixes setting into a
+    list of literal prefix strings. None / empty falls back to the default
+    AliceXC-style prefixes ('Sports |', 'Sports/'). Each prefix is matched
+    case-insensitively at the start of the group name.
+    """
+    if raw is None or not str(raw).strip():
+        return list(DEFAULT_STRIP_PREFIXES)
+    parts = [p.strip() for p in re.split(r"[,\n]", str(raw)) if p.strip()]
+    return parts or list(DEFAULT_STRIP_PREFIXES)
+
+
+def _clean_target_name(
+    group_name: str,
+    is_mixed: bool = False,
+    *,
+    strip_prefixes: Optional[List[str]] = None,
+    add_sports_suffix: bool = True,
+) -> str:
     """
     Generate the override-target group name. Used to give auto-created channels a
     cleaner home group than the M3U source name.
+
+    Configuration knobs:
+      strip_prefixes      list of prefix strings to drop from the head of the
+                          group name. Default: 'Sports |' and 'Sports/'.
+                          Other M3U providers use 'SP-', 'SPRT|', etc.
+      add_sports_suffix   when True (default), mixed-group target names get a
+                          ' Sports' suffix appended if not already present.
 
     Pure_sports rules (is_mixed=False):
       - 'Sports | NFL'        -> 'NFL'              (drop 'Sports |' prefix)
@@ -129,9 +155,10 @@ def _clean_target_name(group_name: str, is_mixed: bool = False) -> str:
       - 'Sports | NBA' AND 'Sports | NBA (2)' both consolidate to target 'NBA'
       - 'UK | Sky Sports'     -> 'UK | Sky Sports'  (region info preserved, no rule matches)
 
-    Mixed rules (is_mixed=True): same as above, plus a final ' Sports' suffix
-    if not already present. The suffix communicates "this is the filtered-sports
-    subset of a bouquet that has non-sports content too." Pipes collapsed to spaces.
+    Mixed rules (is_mixed=True, add_sports_suffix=True): same as above, plus a
+    final ' Sports' suffix if not already present. The suffix communicates
+    "this is the filtered-sports subset of a bouquet that has non-sports
+    content too." Pipes collapsed to spaces.
       - 'Sports | HBO Max US' -> 'HBO Max US Sports'
       - 'US | Peacock TV'     -> 'US Peacock TV Sports'
       - 'IE | Sky'            -> 'IE Sky Sports'
@@ -139,14 +166,20 @@ def _clean_target_name(group_name: str, is_mixed: bool = False) -> str:
       - 'Sports | Stan (2)'   -> 'Stan Sports'
     """
     name = group_name.strip()
-    # Step 1: strip 'Sports |' / 'Sports/' prefix
-    m = re.match(r"^Sports\s*\|\s*(.+)$", name)
-    if m:
-        name = m.group(1).strip()
-    else:
-        m = re.match(r"^Sports/(.+)$", name)
+    prefixes = strip_prefixes if strip_prefixes is not None else list(DEFAULT_STRIP_PREFIXES)
+
+    # Step 1: strip a configured prefix off the head, case-insensitive. Each
+    # prefix is escaped so users without regex literacy can list 'Sports |',
+    # 'SP-', etc. as plain text.
+    for prefix in prefixes:
+        if not prefix:
+            continue
+        rx = re.compile(rf"^{re.escape(prefix)}\s*(.+)$", re.IGNORECASE)
+        m = rx.match(name)
         if m:
             name = m.group(1).strip()
+            break
+
     # Step 2: collapse "X | Sports" suffix to "X Sports"
     m = re.match(r"^(.+?)\s*\|\s*Sports$", name)
     if m:
@@ -162,7 +195,7 @@ def _clean_target_name(group_name: str, is_mixed: bool = False) -> str:
     # Step 4 (mixed only): collapse remaining pipes to spaces, ensure Sports suffix
     if is_mixed:
         name = re.sub(r"\s*\|\s*", " ", name).strip()
-        if not re.search(r"\bSports\b", name, re.IGNORECASE):
+        if add_sports_suffix and not re.search(r"\bSports\b", name, re.IGNORECASE):
             name = f"{name} Sports"
     return name
 
@@ -257,11 +290,19 @@ def _action_classify(settings: Dict[str, Any]) -> Dict[str, Any]:
     samples_per_group = int(settings.get("samples_per_group", DEFAULT_SAMPLES_PER_GROUP))
 
     api_key = _read_api_key(settings)
+    allow_extra_re = classifier.compile_user_terms(settings.get("extra_allow_terms", ""))
+    deny_extra_re = classifier.compile_user_terms(settings.get("extra_deny_terms", ""))
+    extra_hints = str(settings.get("extra_classification_hints", "") or "")
     cache = _read_group_cache()
     groups = _gather_groups(account_id, samples_per_group)
     logger.info("[sports_filter] Classifying %d groups (cache has %d valid entries)", len(groups), len(cache))
 
-    results, new_only = classifier.classify_all_groups(api_key, model, groups, cache)
+    results, new_only = classifier.classify_all_groups(
+        api_key, model, groups, cache,
+        allow_extra_re=allow_extra_re,
+        deny_extra_re=deny_extra_re,
+        extra_hints=extra_hints,
+    )
     cache.update(new_only)
     _write_json(CACHE_PATH, cache)
 
@@ -328,7 +369,10 @@ def _action_refine_mixed(settings: Dict[str, Any]) -> Dict[str, Any]:
     )
 
     if needs_llm:
-        new_results = classifier.classify_streams_with_llm(api_key, model, needs_llm)
+        extra_hints = str(settings.get("extra_classification_hints", "") or "")
+        new_results = classifier.classify_streams_with_llm(
+            api_key, model, needs_llm, extra_hints=extra_hints,
+        )
         stream_cache.update(new_results)
         _write_json(STREAM_CACHE_PATH, stream_cache)
 
@@ -401,6 +445,8 @@ def _action_apply(settings: Dict[str, Any]) -> Dict[str, Any]:
     dry_run = bool(settings.get("dry_run", True))
     also_unselect = bool(settings.get("also_unselect_not_sports", False))
     apply_rename = bool(settings.get("apply_group_rename", True))
+    strip_prefixes = _parse_strip_prefixes(settings.get("group_rename_strip_prefixes"))
+    add_sports_suffix = bool(settings.get("mixed_groups_sports_suffix", True))
 
     cache = _read_group_cache()
     if not cache:
@@ -440,7 +486,12 @@ def _action_apply(settings: Dict[str, Any]) -> Dict[str, Any]:
             # the group is missing, so the placeholder branch is unreachable on a
             # real apply.
             if apply_rename:
-                clean = _clean_target_name(name, is_mixed=(verdict == VERDICT_MIXED))
+                clean = _clean_target_name(
+                    name,
+                    is_mixed=(verdict == VERDICT_MIXED),
+                    strip_prefixes=strip_prefixes,
+                    add_sports_suffix=add_sports_suffix,
+                )
                 if clean != name:
                     target_group = _get_or_create_target_group(clean, dry_run)
                     if target_group:
@@ -546,11 +597,15 @@ def _action_auto_pipeline(settings: Dict[str, Any]) -> Dict[str, Any]:
     """
     Run the full pipeline end-to-end. Used by the daily scheduler and on demand:
       classify -> refine_mixed -> apply (real) -> cleanup_orphans (real)
+
+    The only setting we override is dry_run -> False; otherwise an automated
+    pipeline that respected the dry_run field default (True) would never write.
+    All other behavior (rename, also_unselect, etc.) honors the user's saved
+    settings so the daily run cannot be silently more destructive than the
+    Apply button.
     """
     full_settings = dict(settings)
-    full_settings.setdefault("dry_run", False)
-    full_settings.setdefault("apply_group_rename", True)
-    full_settings.setdefault("also_unselect_not_sports", True)
+    full_settings["dry_run"] = False
 
     logger.info("[sports_filter] auto_pipeline START")
     stages: Dict[str, Any] = {}
@@ -866,10 +921,28 @@ class Plugin:
             {"id": "samples_per_group", "type": "number", "label": "Sample channels per group", "default": DEFAULT_SAMPLES_PER_GROUP},
             {"id": "dry_run", "type": "boolean", "label": "Dry run on Apply", "default": True},
             {
+                "id": "extra_allow_terms", "type": "string",
+                "label": "Extra allow keywords",
+                "default": "",
+                "help_text": "Comma- or newline-separated extra terms that should classify as 'pure_sports' if matched. OR'd with the built-in keyword list. Each term is matched as a whole word, case-insensitive (e.g. 'lacrosse, padel').",
+            },
+            {
+                "id": "extra_deny_terms", "type": "string",
+                "label": "Extra deny keywords",
+                "default": "",
+                "help_text": "Comma- or newline-separated extra terms that should classify as 'not_sports' if matched. OR'd with the built-in deny list. Use this to demote things you do not want treated as sports (e.g. 'flosports, darts, snooker').",
+            },
+            {
+                "id": "extra_classification_hints", "type": "string",
+                "label": "Extra LLM classification hints",
+                "default": "",
+                "help_text": "Free-text instructions appended to the LLM system prompt for borderline groups/streams. Example: 'Treat motorsport documentaries as sports. Treat fishing channels as not_sports.'",
+            },
+            {
                 "id": "auto_pipeline_enabled", "type": "boolean",
                 "label": "Daily auto-run pipeline",
-                "default": True,
-                "help_text": "If on, the plugin runs classify -> refine_mixed -> apply -> cleanup_orphans automatically once per day. Cache makes subsequent runs cheap; only new groups/streams hit the LLM. Disable to require manual runs only.",
+                "default": False,
+                "help_text": "Off by default. When on, the plugin runs classify -> refine_mixed -> apply -> cleanup_orphans once per day at the configured hour. Enable only after you have reviewed dry-run output and trust the cache. Cache makes subsequent runs cheap; only new groups/streams hit the LLM.",
             },
             {
                 "id": "auto_pipeline_hour", "type": "number",
@@ -887,13 +960,25 @@ class Plugin:
                 "id": "apply_group_rename", "type": "boolean",
                 "label": "Apply group rename (group_override) on Apply",
                 "default": True,
-                "help_text": "Strips 'Sports |' prefix from sports groups via Dispatcharr's built-in group_override mechanism. Auto-created channels go into the cleaner-named target group.",
+                "help_text": "Strips configured prefixes from sports group names via Dispatcharr's built-in group_override. Auto-created channels go into the cleaner-named target group. Survives M3U refreshes.",
+            },
+            {
+                "id": "group_rename_strip_prefixes", "type": "string",
+                "label": "Group rename: prefixes to strip",
+                "default": ", ".join(DEFAULT_STRIP_PREFIXES),
+                "help_text": "Comma-separated list of literal prefixes to drop from the head of a group name when building the cleaner target group. AliceXC-style providers ship 'Sports | NFL', so the default is 'Sports |, Sports/'. Other providers might use 'SP-' or 'SPRT|'. Match is case-insensitive. Leave empty for no prefix stripping.",
+            },
+            {
+                "id": "mixed_groups_sports_suffix", "type": "boolean",
+                "label": "Append ' Sports' to mixed-group target names",
+                "default": True,
+                "help_text": "When on, mixed-bouquet target groups get a ' Sports' suffix (e.g. 'US | Peacock TV' -> 'US Peacock TV Sports'). Communicates 'this is the filtered-sports subset of a bigger bouquet'. Turn off if you prefer the bouquet name verbatim.",
             },
             {
                 "id": "also_unselect_not_sports", "type": "boolean",
                 "label": "Also unselect not_sports groups",
                 "default": False,
-                "help_text": "Stronger than auto_channel_sync=False: also flips 'enabled' off, so the M3U import skips the group entirely.",
+                "help_text": "Stronger than auto_channel_sync=False: also flips 'enabled' off, so the M3U import skips the group entirely. Warning: orphans existing channels that pull streams only from those groups.",
             },
             {"id": "debug_mode", "type": "boolean", "label": "Debug logging", "default": False},
         ]

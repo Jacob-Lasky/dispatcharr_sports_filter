@@ -50,6 +50,16 @@ def test_regex_does_not_match_bare_sport_keyword():
     assert classifier.regex_classify("Generic Sports Channel") is None
 
 
+@pytest.mark.parametrize(
+    "name",
+    ["SEC+", "SEC+ Football", "foo SEC+ bar", "Sports | SEC+"],
+)
+def test_regex_classify_matches_sec_plus(name):
+    """The 'sec\\+' built-in token previously had a trailing \\b that silently
+    failed because '+' is not a word char. Regression-pinned with (?!\\w)."""
+    assert classifier.regex_classify(name) == VERDICT_PURE_SPORTS
+
+
 # ----- _extract_json -----
 
 def test_extract_json_plain():

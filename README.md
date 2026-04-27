@@ -71,15 +71,54 @@ group names and the noise stripped out.
 ## Settings (highlights)
 
 - `samples_per_group` — how many channel names from a group to send to the
-  LLM as classification context (default 10).
-- `apply_group_rename` — strip `Sports |` prefixes via `group_override` so
+  LLM as classification context (default 6).
+- `extra_allow_terms` / `extra_deny_terms` — comma- or newline-separated
+  keywords that get OR'd into the built-in regex pre-filter. Use the deny
+  list to demote things you do not want treated as sports (e.g.
+  `flosports, darts, snooker`). Each term is matched as a whole word,
+  case-insensitive, regex-escaped (so plain words work, no regex syntax
+  required). Cheaper than an LLM call and overrides the LLM's verdict.
+- `extra_classification_hints` — free-text instructions appended to the
+  Claude system prompt for borderline cases. Example: `"Treat motorsport
+  documentaries as sports. Treat fishing channels as not_sports."`
+- `apply_group_rename` — rewrite source-group names via `group_override` so
   auto-created channels go into a cleaner-named target group. Survives M3U
   refreshes.
-- `also_unselect_not_sports` — stronger than `auto_channel_sync=False`: also
-  flips `enabled=False`, so the M3U import skips the group entirely. Warning:
-  orphans existing channels that pull streams only from those groups.
-- `auto_pipeline_enabled` + `hour` + `minute` — daily scheduler. Cache makes
-  subsequent runs near-free since only new groups/streams hit the LLM.
+- `group_rename_strip_prefixes` — comma-separated list of prefixes to drop
+  from the head of group names. Default `Sports |, Sports/` matches
+  AliceXC-style providers; other providers might use `SP-`, `SPRT|`, etc.
+- `mixed_groups_sports_suffix` — if on (default), mixed-bouquet target
+  groups get a ` Sports` suffix appended (`US | Peacock TV` → `US Peacock TV
+  Sports`). Turn off if you prefer the bouquet name verbatim.
+- `also_unselect_not_sports` — stronger than `auto_channel_sync=False`:
+  also flips `enabled=False`, so the M3U import skips the group entirely.
+  Warning: orphans existing channels that pull streams only from those
+  groups.
+- `auto_pipeline_enabled` + `hour` + `minute` — daily scheduler.
+  **Off by default** as of 0.6.0 — enable only after you have reviewed
+  dry-run output and trust the cache. Cache makes subsequent runs near-free
+  since only new groups/streams hit the LLM.
+
+## Tested against
+
+This plugin was developed against an AliceXC-style XC provider with `Sports |`
+naming conventions. It should work against any XC-style provider; behavior on
+Stalker portals, Xtream-only setups, or providers with very different naming
+conventions is unverified — start with `dry_run=true` and tune
+`group_rename_strip_prefixes` / `extra_*_terms` to your provider's vocabulary
+before flipping the auto-pipeline on.
+
+## Limitations
+
+- LLM verdicts are cached in `cache.json`. A wrong verdict sticks until you
+  manually edit the file. Heavy users of `extra_deny_terms` are mostly
+  immune since the regex pre-filter runs before the cache for new groups,
+  but a previously-cached wrong verdict still needs a manual edit.
+- The `(N)` consolidation regex (`Sports | NBA (2)` → `NBA`) assumes
+  consecutive integer markers. Providers using `(Backup)`, `[1080p]`, or
+  similar suffixes are not consolidated automatically.
+- `cleanup_orphans` is conservative — it will not delete a `ChannelGroup`
+  with any FK reference, even a stale one.
 
 ## Caches
 

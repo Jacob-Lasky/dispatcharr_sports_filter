@@ -1,6 +1,6 @@
 {
   "name": "Sports-Only Group Filter",
-  "version": "0.5.0",
+  "version": "0.6.0",
   "description": "3-bucket classifier (pure_sports/mixed/not_sports) + per-stream filter for mixed bouquets via name_match_regex + auto-rename source groups via group_override. Anthropic key configurable in settings, or via <plugin_dir>/anthropic_api_key on disk.",
   "author": "Jake (with Claude)",
   "license": "MIT",
@@ -11,7 +11,7 @@
       "id": "m3u_account_id",
       "type": "select",
       "label": "M3U Account",
-      "default": "2",
+      "default": "1",
       "options": [],
       "help_text": "Populated dynamically from the DB at plugin load. Restart Dispatcharr (or touch .reload_token) if you add a new M3U account."
     },
@@ -19,7 +19,7 @@
       "id": "channel_profile_id",
       "type": "select",
       "label": "Channel Profile for sports",
-      "default": "2",
+      "default": "1",
       "options": [],
       "help_text": "Populated dynamically from the DB at plugin load."
     },
@@ -58,11 +58,32 @@
       "help_text": "When true, 'Apply' logs intended changes but does not write to the DB. Disable once you trust the output."
     },
     {
+      "id": "extra_allow_terms",
+      "type": "string",
+      "label": "Extra allow keywords",
+      "default": "",
+      "help_text": "Comma- or newline-separated extra terms that should classify as 'pure_sports' if matched. OR'd with the built-in keyword list. Each term is matched as a whole word, case-insensitive (e.g. 'lacrosse, padel')."
+    },
+    {
+      "id": "extra_deny_terms",
+      "type": "string",
+      "label": "Extra deny keywords",
+      "default": "",
+      "help_text": "Comma- or newline-separated extra terms that should classify as 'not_sports' if matched. OR'd with the built-in deny list. Use this to demote things you do not want treated as sports (e.g. 'flosports, darts, snooker')."
+    },
+    {
+      "id": "extra_classification_hints",
+      "type": "string",
+      "label": "Extra LLM classification hints",
+      "default": "",
+      "help_text": "Free-text instructions appended to the LLM system prompt for borderline groups/streams. Example: 'Treat motorsport documentaries as sports. Treat fishing channels as not_sports.'"
+    },
+    {
       "id": "auto_pipeline_enabled",
       "type": "boolean",
       "label": "Daily auto-run pipeline",
-      "default": true,
-      "help_text": "If on, the plugin runs classify -> refine_mixed -> apply -> cleanup_orphans automatically once per day. Cache makes subsequent runs cheap; only new groups/streams hit the LLM."
+      "default": false,
+      "help_text": "Off by default. When on, the plugin runs classify -> refine_mixed -> apply -> cleanup_orphans once per day at the configured hour. Enable only after you have reviewed dry-run output and trust the cache."
     },
     {
       "id": "auto_pipeline_hour",
@@ -83,7 +104,21 @@
       "type": "boolean",
       "label": "Apply group rename (group_override) on Apply",
       "default": true,
-      "help_text": "Strips 'Sports |' prefix from sports groups via Dispatcharr's built-in group_override. Auto-created channels go into the cleaner-named target group. Survives M3U refreshes."
+      "help_text": "Strips configured prefixes from sports group names via Dispatcharr's built-in group_override. Auto-created channels go into the cleaner-named target group. Survives M3U refreshes."
+    },
+    {
+      "id": "group_rename_strip_prefixes",
+      "type": "string",
+      "label": "Group rename: prefixes to strip",
+      "default": "Sports |, Sports/",
+      "help_text": "Comma-separated list of literal prefixes to drop from the head of a group name when building the cleaner target group. AliceXC-style providers ship 'Sports | NFL', so the default is 'Sports |, Sports/'. Other providers might use 'SP-' or 'SPRT|'. Match is case-insensitive. Leave empty for no prefix stripping."
+    },
+    {
+      "id": "mixed_groups_sports_suffix",
+      "type": "boolean",
+      "label": "Append ' Sports' to mixed-group target names",
+      "default": true,
+      "help_text": "When on, mixed-bouquet target groups get a ' Sports' suffix (e.g. 'US | Peacock TV' -> 'US Peacock TV Sports'). Communicates 'this is the filtered-sports subset of a bigger bouquet'. Turn off if you prefer the bouquet name verbatim."
     },
     {
       "id": "also_unselect_not_sports",

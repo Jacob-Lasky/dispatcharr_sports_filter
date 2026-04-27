@@ -51,6 +51,12 @@ logger = logging.getLogger(f"{LOGGER_NAME}.classifier")
 # group. Earlier versions of this file shipped 'documentar' and 'religi' as
 # silently-dead tokens.
 ALLOW_RE = re.compile(
+    # Most tokens use the standard \b...\b sandwich. The trailing anchor on
+    # 'sec\+' must be (?!\w) instead of \b — a literal '+' is not a word
+    # char, so \b after it fails at end-of-string or before whitespace,
+    # silently killing the match. Same trap that hit 'documentar' / 'religi'
+    # at the leading end. See compile_user_terms() for the same fix in the
+    # user-supplied-terms builder.
     r"\b("
     r"nfl|nba|mlb|nhl|nascar|mls|epl|efl|laliga|bundesliga|seriea|"
     r"ucl|uefa|fifa|conmebol|copa|"
@@ -64,8 +70,9 @@ ALLOW_RE = re.compile(
     r"espn|fox\s*sports?|nbcsn|tnt\s*sports?|sky\s*sports?|bein|dazn|willow|"
     r"flosports?|"
     r"horse\s*rac|darts|snooker|"
-    r"sec\+|acc\s*extra|big\s*ten|big12|pac-?12"
-    r")\b",
+    r"acc\s*extra|big\s*ten|big12|pac-?12"
+    r")\b"
+    r"|\bsec\+(?!\w)",
     re.IGNORECASE,
 )
 
@@ -86,12 +93,51 @@ DENY_RE = re.compile(
 )
 
 
-def regex_classify(name: str) -> Optional[str]:
-    """Return pure_sports / not_sports if regex is decisive, else None."""
-    if DENY_RE.search(name) and not ALLOW_RE.search(name):
+def compile_user_terms(extra_terms: str) -> Optional[re.Pattern]:
+    """Compile a comma- or newline-separated list of user-supplied terms into
+    a case-insensitive regex anchored to word-boundary-equivalents on both
+    sides. Each term is regex-ESCAPED so a non-power-user can list plain
+    words ('flosports', 'horse racing') without learning regex syntax.
+
+    Returns None when the input has no usable terms — callers treat None as
+    "no extension"; do not coerce to an empty pattern that would match
+    everything.
+
+    Trailing anchor uses (?!\\w) instead of \\b so a term ending in a
+    non-word char (e.g. 'sec+') still matches at end-of-string. Plain \\b
+    requires a word/non-word transition, which silently fails when the term
+    already ends in punctuation.
+    """
+    if not extra_terms:
+        return None
+    terms = [t.strip() for t in re.split(r"[,\n]", extra_terms) if t.strip()]
+    if not terms:
+        return None
+    alt = "|".join(re.escape(t) for t in terms)
+    return re.compile(rf"(?<!\w)({alt})(?!\w)", re.IGNORECASE)
+
+
+def regex_classify(
+    name: str,
+    *,
+    allow_re: re.Pattern = ALLOW_RE,
+    deny_re: re.Pattern = DENY_RE,
+    allow_extra_re: Optional[re.Pattern] = None,
+    deny_extra_re: Optional[re.Pattern] = None,
+) -> Optional[str]:
+    """Return pure_sports / not_sports if regex is decisive, else None.
+
+    User-supplied extension regexes (from settings) are OR'd with the built-in
+    base patterns. A name matched ONLY by the user's deny list with no allow
+    hit becomes not_sports — this is how a public user demotes 'flosports'
+    or 'darts' without forking the plugin.
+    """
+    has_allow = bool(allow_re.search(name)) or bool(allow_extra_re and allow_extra_re.search(name))
+    has_deny = bool(deny_re.search(name)) or bool(deny_extra_re and deny_extra_re.search(name))
+    if has_deny and not has_allow:
         return VERDICT_NOT_SPORTS
-    if ALLOW_RE.search(name):
-        if DENY_RE.search(name):
+    if has_allow:
+        if has_deny:
             return None  # ambiguous, defer
         return VERDICT_PURE_SPORTS
     return None
@@ -188,22 +234,31 @@ GROUP_SYSTEM_PROMPT = (
 )
 
 
+def _augment_prompt(base: str, extra_hints: str) -> str:
+    """Append user-supplied hints to a system prompt, separated for legibility."""
+    if not extra_hints or not extra_hints.strip():
+        return base
+    return base + "\n\nAdditional user instructions:\n" + extra_hints.strip()
+
+
 def classify_groups_with_llm(
     api_key: str,
     model: str,
     groups_with_samples: List[Tuple[str, List[str]]],
     batch_size: int = 30,
     timeout: int = 60,
+    extra_hints: str = "",
 ) -> Dict[str, str]:
     """Classify (group_name, [sample_streams]) -> {group_name: pure_sports/mixed/not_sports}."""
     out: Dict[str, str] = {}
     if not groups_with_samples:
         return out
+    system_prompt = _augment_prompt(GROUP_SYSTEM_PROMPT, extra_hints)
     for i in range(0, len(groups_with_samples), batch_size):
         batch = groups_with_samples[i : i + batch_size]
         payload = [{"group": n, "sample_channels": [s for s in samples[:10] if s]} for n, samples in batch]
         user = "Classify each of these groups. Return JSON only.\n\n" + json.dumps(payload, ensure_ascii=False)
-        parsed = _post_claude(api_key, model, GROUP_SYSTEM_PROMPT, user, timeout) or {}
+        parsed = _post_claude(api_key, model, system_prompt, user, timeout) or {}
         # Fail-closed: anything missing or unparseable defaults to not_sports
         for name, _ in batch:
             out[name] = _normalize_group_verdict(parsed.get(name, VERDICT_NOT_SPORTS))
@@ -215,6 +270,10 @@ def classify_all_groups(
     model: str,
     groups_with_samples: Iterable[Tuple[str, List[str]]],
     cache: Dict[str, str],
+    *,
+    allow_extra_re: Optional[re.Pattern] = None,
+    deny_extra_re: Optional[re.Pattern] = None,
+    extra_hints: str = "",
 ) -> Tuple[Dict[str, str], Dict[str, str]]:
     """
     Returns (results, new_only).
@@ -229,7 +288,9 @@ def classify_all_groups(
         if name in cache and cache[name] in GROUP_VERDICTS:
             results[name] = cache[name]
             continue
-        verdict = regex_classify(name)
+        verdict = regex_classify(
+            name, allow_extra_re=allow_extra_re, deny_extra_re=deny_extra_re,
+        )
         if verdict:
             results[name] = verdict
             new_only[name] = verdict
@@ -243,7 +304,9 @@ def classify_all_groups(
                 results[name] = VERDICT_NOT_SPORTS
                 new_only[name] = VERDICT_NOT_SPORTS
         else:
-            llm_results = classify_groups_with_llm(api_key, model, needs_llm)
+            llm_results = classify_groups_with_llm(
+                api_key, model, needs_llm, extra_hints=extra_hints,
+            )
             # Iterate the requested set, not the LLM's response keys, so an extra
             # hallucinated group name in the JSON can't sneak into the cache.
             for name, _ in needs_llm:
@@ -278,16 +341,18 @@ def classify_streams_with_llm(
     streams_with_context: List[Tuple[str, str]],
     batch_size: int = 50,
     timeout: int = 60,
+    extra_hints: str = "",
 ) -> Dict[str, str]:
     """Classify [(stream_name, group_context)] -> {stream_name: sports/not_sports}."""
     out: Dict[str, str] = {}
     if not streams_with_context:
         return out
+    system_prompt = _augment_prompt(STREAM_SYSTEM_PROMPT, extra_hints)
     for i in range(0, len(streams_with_context), batch_size):
         batch = streams_with_context[i : i + batch_size]
         payload = [{"stream": n, "in_group": g} for n, g in batch]
         user = "Classify each stream. Return JSON only.\n\n" + json.dumps(payload, ensure_ascii=False)
-        parsed = _post_claude(api_key, model, STREAM_SYSTEM_PROMPT, user, timeout) or {}
+        parsed = _post_claude(api_key, model, system_prompt, user, timeout) or {}
         for name, _ in batch:
             out[name] = _normalize_stream_verdict(parsed.get(name, VERDICT_NOT_SPORTS))
     return out
