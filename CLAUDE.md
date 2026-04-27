@@ -12,9 +12,7 @@ It targets [Dispatcharr](https://github.com/dispatcharr/dispatcharr) — an open
 source IPTV proxy that lets you map M3U streams to channels and serve them as
 your own M3U + EPG to TV apps like TiviMate.
 
-The user (Jake) runs Dispatcharr in a Docker container on his UnRAID server
-("tower"). This plugin lives in his private install at
-`/data/plugins/dispatcharr_sports_filter/` inside that container.
+The user runs Dispatcharr in a Docker container.
 
 ## File map
 
