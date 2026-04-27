@@ -10,10 +10,12 @@
     {
       "id": "m3u_account_id",
       "type": "select",
-      "label": "M3U Account",
-      "default": "1",
-      "options": [],
-      "help_text": "Populated dynamically from the DB at plugin load. Restart Dispatcharr (or touch .reload_token) if you add a new M3U account."
+      "label": "M3U Account scope",
+      "default": "",
+      "options": [
+        {"value": "", "label": "All M3U accounts"}
+      ],
+      "help_text": "Default 'All M3U accounts' classifies + applies across every enabled provider. Pick a single account only to scope the plugin to one provider. Populated dynamically from the DB at plugin load — restart Dispatcharr if you add a new M3U account."
     },
     {
       "id": "channel_profile_id",

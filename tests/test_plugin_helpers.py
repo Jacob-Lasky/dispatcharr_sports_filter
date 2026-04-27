@@ -182,14 +182,31 @@ def test_action_handlers_table_matches_manifest():
 
 # ----- Settings resolvers -----
 
-def test_resolve_account_id_default():
-    from dispatcharr_sports_filter.constants import DEFAULT_ACCOUNT_ID
-    assert plugin._resolve_account_id({}) == DEFAULT_ACCOUNT_ID
+def test_resolve_account_id_default_is_all():
+    """Empty / unset settings default to None ('all M3U accounts'), the new
+    public-plugin default — was previously DEFAULT_ACCOUNT_ID, but forcing a
+    fresh user to hand-pick a single account before the plugin would do
+    anything was unnecessary cognitive overhead."""
+    assert plugin._resolve_account_id({}) is None
 
 
-def test_resolve_account_id_coerces_string():
-    """plugin.json defines m3u_account_id as a select with string values."""
-    assert plugin._resolve_account_id({"m3u_account_id": "5"}) == 5
+@pytest.mark.parametrize(
+    "raw, expected",
+    [
+        ("", None),
+        (None, None),
+        (0, None),
+        ("0", None),
+        ("5", 5),
+        (5, 5),
+        ("1", 1),
+    ],
+)
+def test_resolve_account_id_handles_all_sentinel_forms(raw, expected):
+    """Dispatcharr's select fields can produce empty string, None, 0, or '0'
+    depending on storage path. All four must map to None ('all'). A real
+    int / numeric-string parses normally."""
+    assert plugin._resolve_account_id({"m3u_account_id": raw}) == expected
 
 
 def test_resolve_model_default():

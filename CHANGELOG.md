@@ -4,6 +4,29 @@ All notable changes to this plugin are documented here.
 
 ## [0.6.0] — 2026-04-27 — public-plugin generalization
 
+### M3U account scope: 'All' is now the default
+
+`m3u_account_id` defaults to an empty string ("All M3U accounts") instead
+of forcing the user to pick a single provider before the plugin will do
+anything. The dropdown gains an "All M3U accounts" option at the top.
+When scoped to all, the plugin classifies + applies across every enabled
+M3U account; the cache is keyed by group name so a name shared between
+providers (e.g. both have 'Sports | NFL') gets one verdict applied to
+both providers' relations.
+
+Single-provider scoping is still supported for users with multiple
+providers who want to limit the plugin to one of them.
+
+The plugin does not touch EPG sources at all — EPG matching happens
+downstream of channel creation, off the channel name, so there is
+nothing to scope EPG-wise.
+
+While here: fixed a pre-existing fragility in `_gather_streams_for_group`
+where two `ChannelGroup` rows sharing a display name (rare but possible
+across providers) would only collect streams from the first row.
+Now uses `channel_group__in=` for the union.
+
+
 This release decouples the plugin from Jake's specific M3U provider, taste,
 and Dispatcharr install so it can be installed by anyone.
 

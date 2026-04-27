@@ -228,36 +228,55 @@ def _build_match_regex(stream_names: List[str]) -> str:
 
 # ---------- Stream gathering ----------
 
-def _gather_groups(account_id: int, samples_per_group: int):
-    """Return [(group_name, [channel_sample_names])] for all enabled relations."""
+def _gather_groups(account_id: Optional[int], samples_per_group: int):
+    """Return [(group_name, [channel_sample_names])] for enabled CGM3UA rows.
+
+    account_id=None scopes across every enabled M3U account. The same group
+    name appearing in multiple providers is emitted once (the cache is keyed
+    by group name, so we'd just classify it twice otherwise) with a random
+    sample of streams drawn from whichever providers carry it.
+    """
     from apps.channels.models import ChannelGroupM3UAccount, Stream
-    rels = (
-        ChannelGroupM3UAccount.objects
-        .filter(m3u_account_id=account_id, enabled=True)
-        .select_related("channel_group")
-    )
+    rels = ChannelGroupM3UAccount.objects.filter(enabled=True).select_related("channel_group")
+    if account_id is not None:
+        rels = rels.filter(m3u_account_id=account_id)
+
+    seen_names = set()
     out = []
     for r in rels:
-        names = list(
-            Stream.objects
-            .filter(m3u_account_id=account_id, channel_group=r.channel_group)
-            .values_list("name", flat=True)[: samples_per_group * 3]
-        )
+        name = r.channel_group.name
+        if name in seen_names:
+            continue
+        seen_names.add(name)
+        stream_qs = Stream.objects.filter(channel_group=r.channel_group)
+        if account_id is not None:
+            stream_qs = stream_qs.filter(m3u_account_id=account_id)
+        names = list(stream_qs.values_list("name", flat=True)[: samples_per_group * 3])
         if len(names) > samples_per_group:
             names = random.sample(names, samples_per_group)
-        out.append((r.channel_group.name, names))
+        out.append((name, names))
     return out
 
 
-def _gather_streams_for_group(account_id: int, group_name: str) -> List[str]:
+def _gather_streams_for_group(account_id: Optional[int], group_name: str) -> List[str]:
+    """Return all stream names in groups matching `group_name`.
+
+    Uses channel_group__in= so a name shared across multiple ChannelGroup rows
+    (rare but possible when several M3U accounts each create their own
+    ChannelGroup row with the same display name) collects streams from all of
+    them. The mixed-group name_match_regex needs the union — a stream that
+    only exists in provider A still needs to match in provider A's CGM3UA
+    row's regex, but a stream that only exists in provider B must not be
+    excluded from B's regex either.
+    """
     from apps.channels.models import ChannelGroup, Stream
-    g = ChannelGroup.objects.filter(name=group_name).first()
-    if not g:
+    groups = list(ChannelGroup.objects.filter(name=group_name))
+    if not groups:
         return []
-    return list(
-        Stream.objects.filter(m3u_account_id=account_id, channel_group=g)
-        .values_list("name", flat=True).distinct()
-    )
+    qs = Stream.objects.filter(channel_group__in=groups)
+    if account_id is not None:
+        qs = qs.filter(m3u_account_id=account_id)
+    return list(qs.values_list("name", flat=True).distinct())
 
 
 # ---------- Settings helpers ----------
@@ -268,8 +287,21 @@ def _apply_debug_logging(settings: Dict[str, Any]) -> None:
         logging.getLogger(LOGGER_NAME).setLevel(logging.DEBUG)
 
 
-def _resolve_account_id(settings: Dict[str, Any]) -> int:
-    return int(settings.get("m3u_account_id", DEFAULT_ACCOUNT_ID))
+def _resolve_account_id(settings: Dict[str, Any]) -> Optional[int]:
+    """Resolve the configured M3U account scope.
+
+    Returns None for "operate across all enabled M3U accounts" (the default
+    for fresh installs — see _build_account_field for how this surfaces in
+    the UI as the 'All M3U accounts' dropdown option). Returns a positive
+    int when the user has explicitly scoped to a single provider.
+
+    The empty string, None, 0, and '0' all map to None — Dispatcharr's
+    select fields can produce any of these depending on the storage path.
+    """
+    raw = settings.get("m3u_account_id", "")
+    if raw is None or raw == "" or raw == 0 or raw == "0":
+        return None
+    return int(raw)
 
 
 def _resolve_profile_id(settings: Dict[str, Any]) -> int:
@@ -456,9 +488,11 @@ def _action_apply(settings: Dict[str, Any]) -> Dict[str, Any]:
 
     rels = (
         ChannelGroupM3UAccount.objects
-        .filter(m3u_account_id=account_id, enabled=True)
+        .filter(enabled=True)
         .select_related("channel_group")
     )
+    if account_id is not None:
+        rels = rels.filter(m3u_account_id=account_id)
 
     pure_applied: List[str] = []
     mixed_applied: List[Dict[str, Any]] = []
@@ -706,15 +740,18 @@ def _action_show_status(settings: Dict[str, Any]) -> Dict[str, Any]:
     account_id = _resolve_account_id(settings)
     cache = _read_group_cache()
     stream_cache = _read_stream_cache()
-    rels = ChannelGroupM3UAccount.objects.filter(m3u_account_id=account_id)
+    rels = ChannelGroupM3UAccount.objects.all()
+    if account_id is not None:
+        rels = rels.filter(m3u_account_id=account_id)
     enabled = rels.filter(enabled=True).count()
     syncing = rels.filter(enabled=True, auto_channel_sync=True).count()
     pure = sum(1 for v in cache.values() if v == VERDICT_PURE_SPORTS)
     mixed = sum(1 for v in cache.values() if v == VERDICT_MIXED)
     notsp = sum(1 for v in cache.values() if v == VERDICT_NOT_SPORTS)
     sport_streams = sum(1 for v in stream_cache.values() if v == VERDICT_SPORTS)
+    scope = f"Acct {account_id}" if account_id is not None else "All accounts"
     msg = (
-        f"Acct {account_id}: total_rels={rels.count()} enabled={enabled} syncing={syncing}. "
+        f"{scope}: total_rels={rels.count()} enabled={enabled} syncing={syncing}. "
         f"Group cache: pure_sports={pure}, mixed={mixed}, not_sports={notsp}. "
         f"Stream cache: {len(stream_cache)} entries ({sport_streams} sports)."
     )
@@ -831,23 +868,31 @@ def _stop_scheduler() -> None:
 # ---------- Plugin shell ----------
 
 def _build_account_field():
+    """Build the m3u_account_id field. Default is 'all' (empty value), which
+    classifies + applies across every enabled M3U account. Users with multiple
+    providers who want to scope the plugin to one of them pick from the list."""
+    all_option = {"value": "", "label": "All M3U accounts"}
     try:
         from apps.m3u.models import M3UAccount
         accounts = list(M3UAccount.objects.all().order_by("id"))
         if accounts:
-            options = [{"value": str(a.id), "label": f"{a.id} - {a.name}"} for a in accounts]
-            default = next((str(a.id) for a in accounts if a.name.lower() != "custom"), str(accounts[0].id))
+            options = [all_option] + [
+                {"value": str(a.id), "label": f"{a.id} - {a.name}"} for a in accounts
+            ]
             return {
-                "id": "m3u_account_id", "type": "select", "label": "M3U Account",
-                "default": default, "options": options,
-                "help_text": "Which M3U account this plugin manages.",
+                "id": "m3u_account_id", "type": "select", "label": "M3U Account scope",
+                "default": "", "options": options,
+                "help_text": "Which M3U accounts to classify + apply against. Default 'All M3U accounts' covers every enabled provider; pick a single account only if you want to scope the plugin to one provider.",
             }
     except Exception as e:
         logger.warning("[sports_filter] Could not query M3UAccount for dropdown: %s", e)
+    # Django unavailable (e.g. settings preview before db is reachable). Fall
+    # back to a free-form string so the user can still type an account id, or
+    # leave blank for 'all'.
     return {
-        "id": "m3u_account_id", "type": "number", "label": "M3U Account ID",
-        "default": DEFAULT_ACCOUNT_ID,
-        "help_text": "Database ID of the M3U account.",
+        "id": "m3u_account_id", "type": "string", "label": "M3U Account scope",
+        "default": "",
+        "help_text": "Database ID of the M3U account, or blank for 'all enabled M3U accounts'.",
     }
 
 
