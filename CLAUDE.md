@@ -98,7 +98,12 @@ Read live logs:
 ssh tower 'docker logs --since 5m Dispatcharr 2>&1 | grep sports_filter | tail -30'
 ```
 
-## Current state (v0.5.0, 2026-04-26)
+## Current state (v0.6.0, 2026-04-27)
+
+**Public release.** Tag `v0.6.0` on `main`, GitHub release at
+https://github.com/Jacob-Lasky/dispatcharr_sports_filter/releases/tag/v0.6.0.
+Source of truth for version: `PLUGIN_VERSION` in `plugin.py`; mirrored in
+`plugin.json`, `__init__.py.__version__`, and the Plugin class.
 
 **Working:**
 - 3-bucket group classification with regex pre-filter + LLM batched classify (Haiku 4.5 default)
@@ -106,16 +111,23 @@ ssh tower 'docker logs --since 5m Dispatcharr 2>&1 | grep sports_filter | tail -
 - Auto-promote / demote based on stream-level verdict (e.g., a "mixed" group classified 100% sports gets promoted to pure_sports)
 - `(N)` consolidation: `NBA` and `NBA (2)` collapse to one `NBA` target via `group_override`
 - Targeted spacing fix: `Big Ten +` → `Big Ten+` (trailing only)
-- Mixed groups get a forced ` Sports` suffix on their clean target name
+- Mixed groups get a forced ` Sports` suffix on their clean target name (toggleable via `mixed_groups_sports_suffix`)
 - `cleanup_orphans` removes stale rename targets
-- Daily scheduler with cross-worker Redis lock
+- Daily scheduler with cross-worker Redis lock (off by default in 0.6.0; opt-in)
 - `anthropic_api_key` available as masked UI field (preferred) or on-disk file (fallback)
+- User-extensible regex pre-filter via `extra_allow_terms` / `extra_deny_terms` (escaped, word-boundary-anchored, OR'd into the built-in tables)
+- Free-text `extra_classification_hints` appended to the LLM system prompt for borderline cases
+- M3U scope defaults to "All accounts" (sentinel `"0"` because Dispatcharr's plugin-field serializer rejects blank select-option values; pinned by a contract test)
+- Constants module (`constants.py`) carries the verdict wire strings + defaults; do NOT spell `"pure_sports"` etc. as literals in code
 
 **Known limitations:**
-- LLM verdict not always right for ambiguous bouquets — caching makes re-runs cheap but a wrong verdict sticks until cache is manually cleared. There's no UI for editing the cache.
-- The `(N)` regex assumes consistent ordering; doesn't handle `NBA (Backup)` etc.
+- LLM verdict not always right for ambiguous bouquets. Caching makes re-runs cheap but a wrong verdict sticks until cache is manually cleared, OR until the user adds a term to `extra_deny_terms` for new cache entries (existing cached entries still need a manual edit). There's no UI for editing the cache.
+- The `(N)` regex assumes consistent integer ordering; doesn't handle `NBA (Backup)`, `[1080p]`, etc.
 - `cleanup_orphans` is conservative — won't delete groups that have any FK references at all, so dead groups with stale `name_match_regex` references stick around.
 - The favorites system is in `dispatcharr_ranked_matchups`, not here. This plugin is purely classify+filter.
+
+**Watch out for:**
+- Three silently-dead built-in regex tokens have been fixed across 0.5.1/0.6.0 (`documentar`, `religi`, `flosport`/`sky/fox/tnt sport`, `sec\+`). All shared the same root cause: `\b` cannot anchor between two word chars or between two non-word chars. If you add a new term to ALLOW_RE/DENY_RE, pick the right anchor: `(y|ies)?` style explicit suffixes for word-char tails, `(?!\w)` for terms ending in a non-word char like `+`. There's a regression test for `sec+` in `tests/test_classifier.py`; add similar pins for any new edge cases.
 
 ## Ideas / TODO (rough priority)
 
@@ -159,3 +171,35 @@ ssh tower 'docker logs --since 5m Dispatcharr 2>&1 | grep sports_filter | tail -
 sports profile this plugin produces. They share the same Anthropic key (via
 the file fallback) and the same target Dispatcharr install. If you're working
 on cross-plugin stuff, both repos are available locally.
+
+## Plugin distribution
+
+This plugin is distributed through the official Dispatcharr Plugins
+repository: https://github.com/Dispatcharr/Plugins. When a plugin PR is
+merged there, it gets automatically packaged, versioned, and published to
+the releases branch — no separate release ceremony from the plugin author.
+
+**Browse what is available right now:**
+- Listing UI: https://dispatcharr.github.io/Dispatcharr-Docs/plugin-listing/
+- Releases branch: https://github.com/Dispatcharr/Plugins/tree/releases
+- Plugin forum thread (community discussion): https://discord.com/channels/1340492560220684331/1487508974457589973
+
+**Submission flow** (already done for sports_filter v0.6.0; reference for
+future major releases):
+
+1. Develop and tag the release in this repo (Jacob-Lasky/dispatcharr_sports_filter).
+2. Fork https://github.com/Dispatcharr/Plugins.
+3. Add the plugin under `plugins/dispatcharr_sports_filter/` with a valid
+   `plugin.json` carrying name, version, description, author, license.
+4. Open a PR. Automated validation checks versioning, metadata, and code
+   quality consistency. See https://github.com/Dispatcharr/Plugins/blob/main/CONTRIBUTING.md.
+5. By submitting, the author grants the Dispatcharr maintainers a license
+   to redistribute through the repo. Code stays the author's. Listing is
+   curated; low-quality / abandoned submissions can be declined or removed.
+
+GPG-signed manifests are coming. The bundled public key will let
+Dispatcharr verify manifest integrity before installing anything.
+
+**Future:** an in-app plugin hub for browse/install/update, plus a
+published spec so third parties can host their own manifest-compatible
+plugin repos.
