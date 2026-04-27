@@ -274,11 +274,17 @@ def classify_all_groups(
     allow_extra_re: Optional[re.Pattern] = None,
     deny_extra_re: Optional[re.Pattern] = None,
     extra_hints: str = "",
+    enable_llm: bool = True,
 ) -> Tuple[Dict[str, str], Dict[str, str]]:
     """
     Returns (results, new_only).
       - results:  {group_name: 'pure_sports'|'mixed'|'not_sports'} for ALL inputs
       - new_only: subset of results that were just classified this run
+
+    enable_llm=False is the regex-only / public-user mode: ambiguous groups
+    that the regex pre-filter cannot resolve fail-closed to not_sports
+    instead of calling the LLM, even if an api_key is configured. The user
+    recovers bouquets they care about via extra_allow_terms.
     """
     results: Dict[str, str] = {}
     new_only: Dict[str, str] = {}
@@ -298,8 +304,18 @@ def classify_all_groups(
         needs_llm.append((name, samples))
 
     if needs_llm:
-        if not api_key:
-            logger.warning("[sports_filter] %d groups need LLM but no API key; defaulting to not_sports", len(needs_llm))
+        can_llm = enable_llm and bool(api_key)
+        if not can_llm:
+            if not enable_llm:
+                logger.info(
+                    "[sports_filter] LLM disabled; %d ambiguous groups -> not_sports (use extra_allow_terms to recover)",
+                    len(needs_llm),
+                )
+            else:
+                logger.warning(
+                    "[sports_filter] %d groups need LLM but no API key; defaulting to not_sports",
+                    len(needs_llm),
+                )
             for name, _ in needs_llm:
                 results[name] = VERDICT_NOT_SPORTS
                 new_only[name] = VERDICT_NOT_SPORTS

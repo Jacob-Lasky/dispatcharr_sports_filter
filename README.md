@@ -70,6 +70,13 @@ group names and the noise stripped out.
 
 ## Settings (highlights)
 
+- `enable_llm` — **off by default (regex-only mode).** No Anthropic API
+  key needed, no per-call cost, no third-party network calls. Ambiguous
+  group names default to `not_sports` and the `Refine mixed groups`
+  action becomes a no-op; tune via `extra_allow_terms` /
+  `extra_deny_terms`. Turn ON to send ambiguous bouquets to Claude AND
+  unlock per-stream classification of `mixed` bouquets — requires an
+  Anthropic API key.
 - `samples_per_group` — how many channel names from a group to send to the
   LLM as classification context (default 6).
 - `extra_allow_terms` / `extra_deny_terms` — comma- or newline-separated

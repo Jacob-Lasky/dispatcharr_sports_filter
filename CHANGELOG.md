@@ -2,6 +2,39 @@
 
 All notable changes to this plugin are documented here.
 
+## [0.7.0] — 2026-04-27 — LLM-free mode (now the default)
+
+Adds `enable_llm` boolean. **Default is now `false`** — fresh installs
+run in regex-only mode out of the box, no Anthropic API key required.
+Toggle the setting on (and configure an API key) to get the v0.6.0
+behavior back.
+
+In regex-only mode:
+
+- No Anthropic API key required.
+- No per-call cost, no third-party network traffic, channel names never
+  leave the Dispatcharr install.
+- Ambiguous group names (regex pre-filter undecided) default to
+  `not_sports`. Recover the bouquets you care about via
+  `extra_allow_terms`.
+- `Refine mixed groups` action returns ok-with-skip rather than
+  erroring out. Per-stream classification of mixed bouquets needs the
+  LLM by design.
+- `Apply` works as-is. With no LLM, no group ever gets classified as
+  `mixed`, so the `name_match_regex` per-stream filter path is never
+  exercised.
+- Pre-existing `mixed` cache entries from earlier LLM-enabled runs are
+  preserved (cache check runs before regex / LLM), so toggling
+  `enable_llm` off is non-destructive.
+
+The pitch for the public Dispatcharr plugin listing becomes a tiered
+on-ramp: **regex tier** (free, simple) for users who want curation
+without an API key, **LLM tier** (smarter, ambiguous-bouquet detection,
+per-stream filtering of mixed bouquets) for users who want the full
+experience.
+
+Closes #2.
+
 ## [0.6.0] — 2026-04-27 — public-plugin generalization
 
 ### M3U account scope: 'All' is now the default

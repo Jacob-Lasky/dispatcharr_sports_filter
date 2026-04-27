@@ -57,7 +57,7 @@ from .constants import (
     VERDICT_SPORTS,
 )
 
-PLUGIN_VERSION = "0.6.0"
+PLUGIN_VERSION = "0.7.0"
 
 logger = logging.getLogger(LOGGER_NAME)
 
@@ -325,15 +325,18 @@ def _action_classify(settings: Dict[str, Any]) -> Dict[str, Any]:
     allow_extra_re = classifier.compile_user_terms(settings.get("extra_allow_terms", ""))
     deny_extra_re = classifier.compile_user_terms(settings.get("extra_deny_terms", ""))
     extra_hints = str(settings.get("extra_classification_hints", "") or "")
+    enable_llm = bool(settings.get("enable_llm", False))
     cache = _read_group_cache()
     groups = _gather_groups(account_id, samples_per_group)
-    logger.info("[sports_filter] Classifying %d groups (cache has %d valid entries)", len(groups), len(cache))
+    mode = "regex+LLM" if enable_llm else "regex-only"
+    logger.info("[sports_filter] Classifying %d groups in %s mode (cache has %d valid entries)", len(groups), mode, len(cache))
 
     results, new_only = classifier.classify_all_groups(
         api_key, model, groups, cache,
         allow_extra_re=allow_extra_re,
         deny_extra_re=deny_extra_re,
         extra_hints=extra_hints,
+        enable_llm=enable_llm,
     )
     cache.update(new_only)
     _write_json(CACHE_PATH, cache)
@@ -374,6 +377,17 @@ def _action_refine_mixed(settings: Dict[str, Any]) -> Dict[str, Any]:
     mixed_groups = sorted(g for g, v in cache.items() if v == VERDICT_MIXED)
     if not mixed_groups:
         return {"status": "ok", "message": "No groups marked 'mixed' in cache. Run classify first."}
+
+    enable_llm = bool(settings.get("enable_llm", False))
+    if not enable_llm:
+        # Regex-only mode: per-stream classification needs the LLM by design.
+        # Status is "ok" not "error" because this is intentional, not a misconfig.
+        msg = (
+            f"LLM disabled, skipping per-stream refinement of {len(mixed_groups)} mixed group(s). "
+            "Enable the 'Use LLM' setting to classify mixed bouquets per stream."
+        )
+        logger.info("[sports_filter] %s", msg)
+        return {"status": "ok", "message": msg, "skipped": True, "mixed_groups": len(mixed_groups)}
 
     api_key = _read_api_key(settings)
     if not api_key:
@@ -966,6 +980,12 @@ class Plugin:
             },
             {"id": "samples_per_group", "type": "number", "label": "Sample channels per group", "default": DEFAULT_SAMPLES_PER_GROUP},
             {"id": "dry_run", "type": "boolean", "label": "Dry run on Apply", "default": True},
+            {
+                "id": "enable_llm", "type": "boolean",
+                "label": "Use LLM (Claude) for ambiguous classification",
+                "default": False,
+                "help_text": "OFF by default (regex-only mode): no Anthropic API key needed, no per-call cost, no third-party network traffic. Ambiguous group names default to 'not_sports'; tune via extra_allow_terms / extra_deny_terms. Turn ON to send ambiguous bouquets to Claude AND get per-stream classification of mixed bouquets — requires an Anthropic API key.",
+            },
             {
                 "id": "extra_allow_terms", "type": "string",
                 "label": "Extra allow keywords",

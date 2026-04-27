@@ -1,6 +1,6 @@
 {
   "name": "Sports-Only Group Filter",
-  "version": "0.6.0",
+  "version": "0.7.0",
   "description": "3-bucket classifier (pure_sports/mixed/not_sports) + per-stream filter for mixed bouquets via name_match_regex + auto-rename source groups via group_override. Anthropic key configurable in settings, or via <plugin_dir>/anthropic_api_key on disk.",
   "author": "Jake (with Claude)",
   "license": "MIT",
@@ -58,6 +58,13 @@
       "label": "Dry run on Apply",
       "default": true,
       "help_text": "When true, 'Apply' logs intended changes but does not write to the DB. Disable once you trust the output."
+    },
+    {
+      "id": "enable_llm",
+      "type": "boolean",
+      "label": "Use LLM (Claude) for ambiguous classification",
+      "default": false,
+      "help_text": "OFF by default (regex-only mode): no Anthropic API key needed, no per-call cost, no third-party network traffic. Ambiguous group names default to 'not_sports'; tune via extra_allow_terms / extra_deny_terms. Turn ON to send ambiguous bouquets to Claude AND get per-stream classification of mixed bouquets — requires an Anthropic API key."
     },
     {
       "id": "extra_allow_terms",
