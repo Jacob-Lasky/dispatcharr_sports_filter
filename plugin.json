@@ -2,7 +2,7 @@
   "name": "Sports-Only Group Filter",
   "version": "0.9.0",
   "description": "3-bucket classifier (pure_sports/mixed/not_sports) + per-stream filter for mixed bouquets via name_match_regex + auto-rename source groups via group_override. Supports Anthropic / OpenAI / Google Gemini — provider is inferred from the chosen model. Each provider's key is configurable in settings or via <plugin_dir>/{anthropic,openai,gemini}_api_key on disk.",
-  "author": "Jake (with Claude)",
+  "author": "DaPieDude",
   "license": "MIT",
   "repo_url": "https://github.com/Jacob-Lasky/dispatcharr_sports_filter",
   "help_url": "https://github.com/Jacob-Lasky/dispatcharr_sports_filter#readme",
