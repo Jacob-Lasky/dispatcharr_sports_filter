@@ -144,3 +144,87 @@ def test_plugin_json_replaced_hour_minute_with_schedule():
     assert "auto_pipeline_schedule" in field_ids
     assert "auto_pipeline_hour" not in field_ids
     assert "auto_pipeline_minute" not in field_ids
+
+
+def test_plugin_py_source_does_not_reference_removed_fields():
+    """plugin.json and Plugin.fields are duplicate manifests by design
+    (Plugin.fields exists so the loader can inject DB-driven dropdown
+    options that JSON cannot). When a field is removed from one, it must
+    be removed from the other. Pin against the v0.8.0 swap by asserting
+    the dead field IDs do not appear anywhere in plugin.py source.
+    """
+    import os
+    here = os.path.dirname(os.path.abspath(__file__))
+    src = open(os.path.join(here, "..", "plugin.py")).read()
+    for dead_id in ("auto_pipeline_hour", "auto_pipeline_minute"):
+        assert dead_id not in src, (
+            f"{dead_id!r} appears in plugin.py source — it was removed in v0.8.0 "
+            f"and must not be re-introduced. Either drop the reference or update "
+            f"this test if the field is being legitimately re-added."
+        )
+    assert "auto_pipeline_schedule" in src, (
+        "auto_pipeline_schedule field missing from plugin.py — Plugin.fields "
+        "and plugin.json have drifted."
+    )
+
+
+def test_plugin_json_default_matches_constants_default():
+    """plugin.json's default for auto_pipeline_schedule must equal
+    constants.DEFAULT_SCHEDULE_STRING. Otherwise a fresh install with no
+    saved settings parses differently than the Python-level fallback,
+    and the saved-empty-string path silently diverges from the
+    not-yet-saved path."""
+    import json
+    import os
+    from dispatcharr_sports_filter.constants import DEFAULT_SCHEDULE_STRING
+    here = os.path.dirname(os.path.abspath(__file__))
+    with open(os.path.join(here, "..", "plugin.json")) as f:
+        manifest = json.load(f)
+    schedule_field = next(f for f in manifest["fields"] if f["id"] == "auto_pipeline_schedule")
+    assert schedule_field["default"] == DEFAULT_SCHEDULE_STRING
+
+
+def test_default_schedule_string_parses_to_default_schedule_times():
+    """The string default and tuple default must round-trip. If a future
+    change updates one without the other, this test fails loudly rather
+    than letting them silently diverge."""
+    from dispatcharr_sports_filter.constants import (
+        DEFAULT_SCHEDULE_STRING, DEFAULT_SCHEDULE_TIMES,
+    )
+    assert plugin._parse_schedule(DEFAULT_SCHEDULE_STRING) == list(DEFAULT_SCHEDULE_TIMES)
+
+
+# ----- _format_schedule_times -----
+
+@pytest.mark.parametrize(
+    "times, expected",
+    [
+        ([(3, 0)], "0300"),
+        ([(0, 0), (6, 0), (12, 0), (18, 0)], "0000,0600,1200,1800"),
+        ([(23, 59)], "2359"),
+        ([(0, 5)], "0005"),
+        ([], ""),
+        # Tuple input also works
+        (((3, 0),), "0300"),
+    ],
+)
+def test_format_schedule_times(times, expected):
+    """Format helper is the inverse of _parse_schedule for valid input."""
+    assert plugin._format_schedule_times(times) == expected
+
+
+def test_format_then_parse_round_trips():
+    """Property-style: parse -> format -> parse should be a fixed point
+    for any valid schedule. Ensures the format function emits something
+    the parser accepts."""
+    cases = [
+        "0300",
+        "0000,0600,1200,1800",
+        "03:00, 15:30",
+        "0",  # bare hour
+    ]
+    for raw in cases:
+        parsed = plugin._parse_schedule(raw)
+        formatted = plugin._format_schedule_times(parsed)
+        reparsed = plugin._parse_schedule(formatted)
+        assert reparsed == parsed, f"{raw!r} did not round-trip: {parsed} -> {formatted!r} -> {reparsed}"

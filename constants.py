@@ -31,6 +31,13 @@ DEFAULT_SAMPLES_PER_GROUP = 6
 # AliceXC-style; other providers use "SP-", "SPRT|", etc.
 DEFAULT_STRIP_PREFIXES = ("Sports |", "Sports/")
 
+# Auto-pipeline schedule defaults. The STRING form is what plugin.json renders
+# in the UI's default field; the TIMES form is what the scheduler thread falls
+# back to when parsing fails. A unit test asserts _parse_schedule of the
+# STRING produces exactly the TIMES, so they cannot drift silently.
+DEFAULT_SCHEDULE_STRING = "0300"
+DEFAULT_SCHEDULE_TIMES = ((3, 0),)
+
 # Cross-worker scheduler lock (Redis SET NX EX).
 SCHEDULER_LOCK_KEY = "plugins:sports_filter:auto_pipeline:lock"
 SCHEDULER_LOCK_TTL_S = 1800

@@ -38,12 +38,14 @@ import random
 import re
 import threading
 from datetime import datetime, timedelta
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from .constants import (
     DEFAULT_MODEL,
     DEFAULT_PROFILE_ID,
     DEFAULT_SAMPLES_PER_GROUP,
+    DEFAULT_SCHEDULE_STRING,
+    DEFAULT_SCHEDULE_TIMES,
     DEFAULT_STRIP_PREFIXES,
     GROUP_VERDICTS,
     LOGGER_NAME,
@@ -780,10 +782,7 @@ def _action_show_status(settings: Dict[str, Any]) -> Dict[str, Any]:
 
 # ---------- Schedule parsing ----------
 
-DEFAULT_SCHEDULE_TIMES = ((3, 0),)  # 0300 daily — preserves prior default
-
-
-def _parse_schedule(raw: object) -> List[tuple]:
+def _parse_schedule(raw: Any) -> List[Tuple[int, int]]:
     """Parse comma-separated clock times into a sorted, de-duplicated list of
     (hour, minute) tuples. Generous parser, strict validator:
       - 'HHMM'   ('0300', '1830')
@@ -791,7 +790,7 @@ def _parse_schedule(raw: object) -> List[tuple]:
       - 'H:MM'   ('3:00')
       - 'HH'     ('3', '03') treated as HH:00
     Whitespace anywhere is ignored. Invalid entries log a warning and are
-    skipped. If nothing parses, falls back to the default 0300.
+    skipped. If nothing parses, falls back to constants.DEFAULT_SCHEDULE_TIMES.
 
     Returns the times sorted ascending; the scheduler walks this to find
     the next firing time after `now`.
@@ -802,7 +801,7 @@ def _parse_schedule(raw: object) -> List[tuple]:
     if not text:
         return list(DEFAULT_SCHEDULE_TIMES)
 
-    out: List[tuple] = []
+    out: List[Tuple[int, int]] = []
     for tok in re.split(r"[,\s]+", text):
         if not tok:
             continue
@@ -827,13 +826,20 @@ def _parse_schedule(raw: object) -> List[tuple]:
     if not out:
         logger.warning(
             "[sports_filter] schedule %r had no valid entries, falling back to default %s",
-            text, DEFAULT_SCHEDULE_TIMES,
+            text, _format_schedule_times(DEFAULT_SCHEDULE_TIMES),
         )
         return list(DEFAULT_SCHEDULE_TIMES)
     return sorted(set(out))
 
 
-def _next_firing(now: datetime, schedule: List[tuple]) -> datetime:
+def _format_schedule_times(times) -> str:
+    """Render a list/tuple of (hour, minute) tuples as canonical comma-separated
+    HHMM, used for log lines and warning messages. Inverse of _parse_schedule
+    for valid input."""
+    return ",".join(f"{h:02d}{m:02d}" for h, m in times)
+
+
+def _next_firing(now: datetime, schedule: List[Tuple[int, int]]) -> datetime:
     """Given a sorted list of (hour, minute) tuples, return the next datetime
     strictly after `now`. Wraps to tomorrow's earliest if all of today's
     times are already past. Caller is responsible for ensuring `schedule`
@@ -916,7 +922,7 @@ def _scheduler_loop() -> None:
             logger.info(
                 "[sports_filter] scheduler sleeping %.0fs until next run (%s) — schedule=%s",
                 sleep_s, target.isoformat(timespec="seconds"),
-                ",".join(f"{h:02d}{m:02d}" for h, m in schedule),
+                _format_schedule_times(schedule),
             )
             if _SCHEDULER_STOP.wait(sleep_s):
                 break
@@ -1092,7 +1098,7 @@ class Plugin:
             {
                 "id": "auto_pipeline_schedule", "type": "string",
                 "label": "Schedule (clock times, comma-separated)",
-                "default": "0300",
+                "default": DEFAULT_SCHEDULE_STRING,
                 "help_text": "Comma-separated list of clock times (server local time) when the auto-pipeline fires. Default '0300' is daily at 3 AM. Multi-times-per-day examples: '0000,0600,1200,1800' (every 6h) or '0300,1500' (every 12h). Both 'HHMM' and 'HH:MM' forms work; whitespace is ignored. Invalid entries are skipped with a warning.",
             },
             {
