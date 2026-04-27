@@ -60,108 +60,6 @@ own M3U-import code reads these on every refresh, so renames + filters
   lock at `plugins:sports_filter:auto_pipeline:lock` ensures only one fires
   per scheduled tick.
 
-## Development loop (Jake's tower)
-
-Two deploy flows depending on where the dev session is running.
-
-### From Jake's laptop (rsync + ssh)
-
-The user keeps source in `/home/jlasky/Code/dispatcharr_sports_filter/` on his
-laptop and deploys via:
-
-```bash
-# Sync source → tower /tmp
-rsync -avz /home/jlasky/Code/dispatcharr_sports_filter/ \
-    tower:/tmp/dispatcharr_sports_filter/
-
-# Copy into Dispatcharr container (the WHOLE directory at once - safe,
-# no docker-cp-multi-source trap because we are copying ONE directory)
-ssh tower 'docker cp /tmp/dispatcharr_sports_filter Dispatcharr:/data/plugins/'
-```
-
-### From pocket-dev (Claude with docker socket mounted)
-
-When Claude is running inside the pocket-dev container on tower, the
-deploy is a series of `docker cp` calls directly against the host docker
-socket. **Beware the silent multi-source failure:**
-
-> **DO NOT** write `docker cp file1.py file2.py Dispatcharr:/data/plugins/sports_filter/`.
-> `docker cp` accepts exactly ONE source path. With two source args it
-> silently does the wrong thing (copies one file, errors quietly, OR
-> interprets the second arg as the destination — depending on the docker
-> client). The deploy looks successful but the second file never lands.
-> The previous pycache then loads the OLD code, and a "verified live"
-> probe runs against stale bytecode while reporting STATUS: ok.
->
-> **Caught this in v0.8.0 sr-dev-review** — claimed live verification
-> on a refactor that introduced a new `DEFAULT_SCHEDULE_STRING` import,
-> but `constants.py` never deployed. The probe ran the previous version
-> from `__pycache__/constants.cpython-313.pyc` and returned ok.
-
-Safe pattern: one `docker cp` per file, then nuke pycache, then verify
-the new symbol actually landed:
-
-```bash
-cd /tmp/dispatcharr_sports_filter
-docker cp plugin.py    Dispatcharr:/data/plugins/dispatcharr_sports_filter/plugin.py
-docker cp classifier.py Dispatcharr:/data/plugins/dispatcharr_sports_filter/classifier.py
-docker cp constants.py Dispatcharr:/data/plugins/dispatcharr_sports_filter/constants.py
-docker cp plugin.json  Dispatcharr:/data/plugins/dispatcharr_sports_filter/plugin.json
-docker cp __init__.py  Dispatcharr:/data/plugins/dispatcharr_sports_filter/__init__.py
-docker exec Dispatcharr chown -R dispatch:dispatch /data/plugins/dispatcharr_sports_filter/
-docker exec Dispatcharr rm -rf /data/plugins/dispatcharr_sports_filter/__pycache__
-
-# Verify deploy landed before claiming live verification:
-docker exec Dispatcharr grep -c '<some-new-symbol>' /data/plugins/dispatcharr_sports_filter/<file>.py
-```
-
-The grep step is non-optional. If the new symbol count is 0, the deploy
-did not land. Always verify BEFORE running the live probe and BEFORE
-writing "live-verified" in a commit message.
-
-### Run an action programmatically (after edits)
-
-From the laptop:
-
-```bash
-ssh tower 'docker exec Dispatcharr python -c "
-import django, os, sys
-sys.path.insert(0, \"/app\")
-os.environ.setdefault(\"DJANGO_SETTINGS_MODULE\", \"dispatcharr.settings\")
-django.setup()
-from apps.plugins.loader import PluginManager
-pm = PluginManager.get()
-pm.discover_plugins(sync_db=False, force_reload=True, use_cache=False)
-r = pm.run_action(\"dispatcharr_sports_filter\", \"show_status\", {})
-print(r.get(\"message\", r))
-"'
-```
-
-From pocket-dev: drop the `ssh tower` wrapper since you have direct
-access to the docker socket:
-
-```bash
-docker exec Dispatcharr python -c "
-import django, os, sys
-sys.path.insert(0, '/app')
-os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'dispatcharr.settings')
-django.setup()
-from apps.plugins.loader import PluginManager
-pm = PluginManager.get()
-pm.discover_plugins(sync_db=False, force_reload=True, use_cache=False)
-r = pm.run_action('dispatcharr_sports_filter', 'show_status', {})
-print(r.get('message', r))
-"
-```
-
-Read live logs:
-
-```bash
-ssh tower 'docker logs --since 5m Dispatcharr 2>&1 | grep sports_filter | tail -30'
-# or from pocket-dev:
-docker logs --since 5m Dispatcharr 2>&1 | grep sports_filter | tail -30
-```
-
 ## Current state (v0.6.0, 2026-04-27)
 
 **Public release.** Tag `v0.6.0` on `main`, GitHub release at
@@ -212,29 +110,6 @@ Source of truth for version: `PLUGIN_VERSION` in `plugin.py`; mirrored in
    Worth chunking.
 6. **Hook into cleanup_orphans for orphaned regex targets** — if a clean
    target group's regex no longer matches any streams, it's orphaned.
-
-## User context (Jake)
-
-- Senior at Deepgram, knows Python well, builds for himself
-- Prefers terse output; will redirect if a path is wrong
-- Trusts Claude to ship full features when given the lean ("knock it out")
-- Tower runs Dispatcharr 0.23.0 (the latest as of late April 2026)
-- M3U provider is AliceXC (XC type, account id=4); single provider
-- Channel profile id=2 is "Sports" — that's the target profile the plugin assigns
-- Other plugins on the same Dispatcharr install (don't disturb): `iptv_checker`,
-  `stream_mapparr`, `epg_janitor`, `event_channel_managarr`,
-  `dispatcharr_ranked_matchups`, `dispatcharr_timeshift`. Some of these had
-  postgres-pool issues in spring 2026 — see plugin.py docstrings if you hit
-  "too many clients already" errors.
-- Postgres `max_connections` was bumped 100 → 200 on 2026-04-26 to handle
-  multi-plugin load. Don't go below 200 if you're adding worker-heavy code.
-
-## Companion plugin
-
-`dispatcharr_ranked_matchups` is the user's other plugin that builds on the
-sports profile this plugin produces. They share the same Anthropic key (via
-the file fallback) and the same target Dispatcharr install. If you're working
-on cross-plugin stuff, both repos are available locally.
 
 ## Plugin distribution
 
