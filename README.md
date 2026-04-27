@@ -37,7 +37,7 @@ group names and the noise stripped out.
 1. Clone this repo into your Dispatcharr plugins directory:
 
    ```bash
-   docker exec dispatcharr git clone https://github.com/jacob-lasky/dispatcharr-sports-filter.git \
+   docker exec dispatcharr git clone https://github.com/Jacob-Lasky/dispatcharr_sports_filter.git \
        /data/plugins/dispatcharr_sports_filter
    ```
 

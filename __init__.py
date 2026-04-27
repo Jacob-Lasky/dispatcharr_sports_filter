@@ -1,6 +1,6 @@
 """Dispatcharr Sports-Only Group Filter plugin."""
 
-from .plugin import Plugin
+from .plugin import PLUGIN_VERSION, Plugin
 
 __all__ = ["Plugin"]
-__version__ = "0.1.0"
+__version__ = PLUGIN_VERSION

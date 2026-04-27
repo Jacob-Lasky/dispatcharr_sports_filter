@@ -2,6 +2,35 @@
 
 All notable changes to this plugin are documented here.
 
+## [0.5.1] — 2026-04-27
+
+- Fix six dead regex tokens in classifier pre-filter (`sky\s*sport`,
+  `fox\s*sport`, `tnt\s*sport`, `flosport`, `documentar`, `religi`) that the
+  trailing `\b` anchor silently prevented from ever matching plural / suffixed
+  forms like "Sky Sports", "Documentaries", "Religious".
+- Fix `_build_match_regex` to return `""` (no filter) when every input is
+  blank, instead of `^()$` which would silently drop all real streams.
+- Extract verdict + default constants to `constants.py` so the wire strings
+  (`pure_sports` / `mixed` / `not_sports` / `sports`) and default IDs have a
+  single source of truth across `plugin.py`, `classifier.py`, and tests.
+- Replace `Plugin.run` if-chain with `ACTION_HANDLERS` dispatch dict; tests
+  pin the action manifest against the dispatch table.
+- Drop unreachable `<would-create:NAME>` placeholder cleanup in
+  `_action_apply` (the path can only be entered during dry-run).
+- Iterate `needs_llm` instead of LLM response keys in `classify_all_groups`
+  so a hallucinated extra group name in the response can't sneak into the
+  cache.
+- `cleanup_orphans` now pulls only `custom_properties` via `values_list`
+  instead of hydrating each `ChannelGroupM3UAccount` row.
+- Stale identifiers fixed: docstring "Version 0.3.0" -> sourced from
+  `PLUGIN_VERSION`; `__version__ = "0.1.0"` -> sourced from `PLUGIN_VERSION`;
+  repo URL `jacob-lasky/dispatcharr-sports-filter` ->
+  `Jacob-Lasky/dispatcharr_sports_filter` in `plugin.json`, `plugin.py`, and
+  `README.md` (the README install command now actually clones).
+- New `tests/` directory with 78 tests for pure functions (regex pre-filter,
+  name cleaner, regex builder, JSON extraction, normalizers, cache filters,
+  API-key resolution, action manifest contract, settings resolvers).
+
 ## [0.5.0] — 2026-04-26
 
 - Daily auto-pipeline scheduler with cross-worker Redis lock so only one

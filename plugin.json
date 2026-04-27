@@ -4,8 +4,8 @@
   "description": "3-bucket classifier (pure_sports/mixed/not_sports) + per-stream filter for mixed bouquets via name_match_regex + auto-rename source groups via group_override. Anthropic key configurable in settings, or via <plugin_dir>/anthropic_api_key on disk.",
   "author": "Jake (with Claude)",
   "license": "MIT",
-  "repo_url": "https://github.com/jacob-lasky/dispatcharr-sports-filter",
-  "help_url": "https://github.com/jacob-lasky/dispatcharr-sports-filter#readme",
+  "repo_url": "https://github.com/Jacob-Lasky/dispatcharr_sports_filter",
+  "help_url": "https://github.com/Jacob-Lasky/dispatcharr_sports_filter#readme",
   "fields": [
     {
       "id": "m3u_account_id",

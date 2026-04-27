@@ -28,11 +28,28 @@ import time
 import urllib.request
 from typing import Dict, Iterable, List, Optional, Tuple
 
-logger = logging.getLogger("plugins.dispatcharr_sports_filter.classifier")
+from .constants import (
+    GROUP_VERDICTS,
+    LOGGER_NAME,
+    VERDICT_MIXED,
+    VERDICT_NOT_SPORTS,
+    VERDICT_PURE_SPORTS,
+    VERDICT_SPORTS,
+)
+
+logger = logging.getLogger(f"{LOGGER_NAME}.classifier")
 
 # ALLOW_RE matches ONLY decisive sport-league / sport-network keywords.
 # We removed bare 'sport'/'sports' so that ambiguous bouquet names defer to the LLM,
 # which can decide between pure_sports and mixed using sample channel content.
+# Note on \b boundary anchoring:
+# Each alternation is wrapped in \b...\b, which forces a word-boundary at both
+# ends. That means a stem like 'documentar' will NOT match 'documentary' or
+# 'documentaries' (the boundary fails between 'r' and 'y'/'i'). The same trap
+# kills any pluralization for 'sport' tokens. So every term that needs a
+# plural-y/plural-s/plural-ies suffix must spell it explicitly with a `?`
+# group. Earlier versions of this file shipped 'documentar' and 'religi' as
+# silently-dead tokens.
 ALLOW_RE = re.compile(
     r"\b("
     r"nfl|nba|mlb|nhl|nascar|mls|epl|efl|laliga|bundesliga|seriea|"
@@ -44,8 +61,8 @@ ALLOW_RE = re.compile(
     r"cricket|ipl|"
     r"rugby|nrl|afl|"
     r"olympic|"
-    r"espn|fox\s*sport|nbcsn|tnt\s*sport|sky\s*sport|bein|dazn|willow|"
-    r"flosport|"
+    r"espn|fox\s*sports?|nbcsn|tnt\s*sports?|sky\s*sports?|bein|dazn|willow|"
+    r"flosports?|"
     r"horse\s*rac|darts|snooker|"
     r"sec\+|acc\s*extra|big\s*ten|big12|pac-?12"
     r")\b",
@@ -59,10 +76,10 @@ DENY_RE = re.compile(
     r"24/?7|"
     r"kids|cartoons?|disney|nickelodeon|"
     r"news|cnn|fox\s*news|msnbc|bbc\s*news|"
-    r"documentar|history\s*channel|nat\s*geo|"
+    r"documentar(y|ies)|history\s*channel|nat\s*geo|"
     r"music|mtv|vh1|radio|sirius|"
     r"porn|xxx|adult|nsfw|playboy|"
-    r"religi|gospel|cooking|home\s*shop|qvc|hsn|"
+    r"religio(us|n)|gospel|cooking|home\s*shop|qvc|hsn|"
     r"weather|game\s*show|reality"
     r")\b",
     re.IGNORECASE,
@@ -70,13 +87,13 @@ DENY_RE = re.compile(
 
 
 def regex_classify(name: str) -> Optional[str]:
-    """Return 'pure_sports' / 'not_sports' if regex is decisive, else None."""
+    """Return pure_sports / not_sports if regex is decisive, else None."""
     if DENY_RE.search(name) and not ALLOW_RE.search(name):
-        return "not_sports"
+        return VERDICT_NOT_SPORTS
     if ALLOW_RE.search(name):
         if DENY_RE.search(name):
             return None  # ambiguous, defer
-        return "pure_sports"
+        return VERDICT_PURE_SPORTS
     return None
 
 
@@ -136,16 +153,16 @@ def _extract_json(text: str) -> Dict[str, str]:
 
 def _normalize_group_verdict(v: object) -> str:
     s = str(v).lower().strip().replace("-", "_").replace(" ", "_")
-    if s in ("pure_sports", "puresports"):
-        return "pure_sports"
-    if s == "mixed":
-        return "mixed"
-    return "not_sports"
+    if s in (VERDICT_PURE_SPORTS, "puresports"):
+        return VERDICT_PURE_SPORTS
+    if s == VERDICT_MIXED:
+        return VERDICT_MIXED
+    return VERDICT_NOT_SPORTS
 
 
 def _normalize_stream_verdict(v: object) -> str:
     s = str(v).lower().strip()
-    return "sports" if s == "sports" else "not_sports"
+    return VERDICT_SPORTS if s == VERDICT_SPORTS else VERDICT_NOT_SPORTS
 
 
 # ----- Group-level classification (ternary) -----
@@ -189,7 +206,7 @@ def classify_groups_with_llm(
         parsed = _post_claude(api_key, model, GROUP_SYSTEM_PROMPT, user, timeout) or {}
         # Fail-closed: anything missing or unparseable defaults to not_sports
         for name, _ in batch:
-            out[name] = _normalize_group_verdict(parsed.get(name, "not_sports"))
+            out[name] = _normalize_group_verdict(parsed.get(name, VERDICT_NOT_SPORTS))
     return out
 
 
@@ -209,7 +226,7 @@ def classify_all_groups(
     needs_llm: List[Tuple[str, List[str]]] = []
 
     for name, samples in groups_with_samples:
-        if name in cache and cache[name] in ("pure_sports", "mixed", "not_sports"):
+        if name in cache and cache[name] in GROUP_VERDICTS:
             results[name] = cache[name]
             continue
         verdict = regex_classify(name)
@@ -223,11 +240,14 @@ def classify_all_groups(
         if not api_key:
             logger.warning("[sports_filter] %d groups need LLM but no API key; defaulting to not_sports", len(needs_llm))
             for name, _ in needs_llm:
-                results[name] = "not_sports"
-                new_only[name] = "not_sports"
+                results[name] = VERDICT_NOT_SPORTS
+                new_only[name] = VERDICT_NOT_SPORTS
         else:
             llm_results = classify_groups_with_llm(api_key, model, needs_llm)
-            for name, verdict in llm_results.items():
+            # Iterate the requested set, not the LLM's response keys, so an extra
+            # hallucinated group name in the JSON can't sneak into the cache.
+            for name, _ in needs_llm:
+                verdict = llm_results.get(name, VERDICT_NOT_SPORTS)
                 results[name] = verdict
                 new_only[name] = verdict
 
@@ -269,5 +289,5 @@ def classify_streams_with_llm(
         user = "Classify each stream. Return JSON only.\n\n" + json.dumps(payload, ensure_ascii=False)
         parsed = _post_claude(api_key, model, STREAM_SYSTEM_PROMPT, user, timeout) or {}
         for name, _ in batch:
-            out[name] = _normalize_stream_verdict(parsed.get(name, "not_sports"))
+            out[name] = _normalize_stream_verdict(parsed.get(name, VERDICT_NOT_SPORTS))
     return out

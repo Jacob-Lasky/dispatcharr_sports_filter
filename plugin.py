@@ -1,9 +1,8 @@
 """
-Dispatcharr Sports-Only Group Filter
-
-Version 0.3.0 — three-bucket group classification + per-stream filtering for
-mixed bouquets + auto-rename of source groups via the built-in group_override
-mechanism.
+Dispatcharr Sports-Only Group Filter — three-bucket group classification +
+per-stream filtering for mixed bouquets + auto-rename of source groups via
+the built-in group_override mechanism. Version is the source of truth in
+plugin.json and the Plugin class self.version.
 
 Pipeline:
   1) classify        -> read enabled groups, classify each as
@@ -39,9 +38,27 @@ import random
 import re
 import threading
 from datetime import datetime, timedelta
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 
-logger = logging.getLogger("plugins.dispatcharr_sports_filter")
+from .constants import (
+    DEFAULT_ACCOUNT_ID,
+    DEFAULT_MODEL,
+    DEFAULT_PROFILE_ID,
+    DEFAULT_SAMPLES_PER_GROUP,
+    GROUP_VERDICTS,
+    LOGGER_NAME,
+    SCHEDULER_LOCK_KEY,
+    SCHEDULER_LOCK_TTL_S,
+    STREAM_VERDICTS,
+    VERDICT_MIXED,
+    VERDICT_NOT_SPORTS,
+    VERDICT_PURE_SPORTS,
+    VERDICT_SPORTS,
+)
+
+PLUGIN_VERSION = "0.5.0"
+
+logger = logging.getLogger(LOGGER_NAME)
 
 PLUGIN_DIR = os.path.dirname(os.path.abspath(__file__))
 CACHE_PATH = os.path.join(PLUGIN_DIR, "cache.json")
@@ -89,14 +106,12 @@ def _write_json(path: str, data: Dict[str, str]) -> None:
 def _read_group_cache() -> Dict[str, str]:
     """Read group cache, dropping legacy v1 'sports' verdicts so they re-classify."""
     raw = _read_json(CACHE_PATH)
-    valid = {"pure_sports", "mixed", "not_sports"}
-    return {k: v for k, v in raw.items() if v in valid}
+    return {k: v for k, v in raw.items() if v in GROUP_VERDICTS}
 
 
 def _read_stream_cache() -> Dict[str, str]:
     raw = _read_json(STREAM_CACHE_PATH)
-    valid = {"sports", "not_sports"}
-    return {k: v for k, v in raw.items() if v in valid}
+    return {k: v for k, v in raw.items() if v in STREAM_VERDICTS}
 
 
 # ---------- Group rename helpers ----------
@@ -166,10 +181,15 @@ def _get_or_create_target_group(name: str, dry_run: bool):
 
 
 def _build_match_regex(stream_names: List[str]) -> str:
-    """Build a case-insensitive iregex matching exactly any of these stream names."""
-    if not stream_names:
+    """Build a case-insensitive iregex matching exactly any of these stream names.
+
+    Returns "" when nothing usable is left after filtering blanks. Important:
+    `^()$` is NOT a no-op — it would match the empty string and silently drop
+    every real stream name from the filter, which is exactly the wrong fail-mode.
+    """
+    escaped = [re.escape(n) for n in stream_names or [] if n]
+    if not escaped:
         return ""
-    escaped = [re.escape(n) for n in stream_names if n]
     return r"^(" + "|".join(escaped) + r")$"
 
 
@@ -207,16 +227,34 @@ def _gather_streams_for_group(account_id: int, group_name: str) -> List[str]:
     )
 
 
+# ---------- Settings helpers ----------
+
+def _apply_debug_logging(settings: Dict[str, Any]) -> None:
+    """Bump the plugin logger to DEBUG when the setting is on."""
+    if bool(settings.get("debug_mode", False)):
+        logging.getLogger(LOGGER_NAME).setLevel(logging.DEBUG)
+
+
+def _resolve_account_id(settings: Dict[str, Any]) -> int:
+    return int(settings.get("m3u_account_id", DEFAULT_ACCOUNT_ID))
+
+
+def _resolve_profile_id(settings: Dict[str, Any]) -> int:
+    return int(settings.get("channel_profile_id", DEFAULT_PROFILE_ID))
+
+
+def _resolve_model(settings: Dict[str, Any]) -> str:
+    return settings.get("model", DEFAULT_MODEL)
+
+
 # ---------- Action: classify (group level) ----------
 
 def _action_classify(settings: Dict[str, Any]) -> Dict[str, Any]:
     from . import classifier
-    account_id = int(settings.get("m3u_account_id", 2))
-    model = settings.get("model", "claude-haiku-4-5")
-    samples_per_group = int(settings.get("samples_per_group", 6))
-    debug = bool(settings.get("debug_mode", False))
-    if debug:
-        logging.getLogger("plugins.dispatcharr_sports_filter").setLevel(logging.DEBUG)
+    _apply_debug_logging(settings)
+    account_id = _resolve_account_id(settings)
+    model = _resolve_model(settings)
+    samples_per_group = int(settings.get("samples_per_group", DEFAULT_SAMPLES_PER_GROUP))
 
     api_key = _read_api_key(settings)
     cache = _read_group_cache()
@@ -227,9 +265,9 @@ def _action_classify(settings: Dict[str, Any]) -> Dict[str, Any]:
     cache.update(new_only)
     _write_json(CACHE_PATH, cache)
 
-    pure = sorted(g for g, v in results.items() if v == "pure_sports")
-    mixed = sorted(g for g, v in results.items() if v == "mixed")
-    not_sports = sorted(g for g, v in results.items() if v == "not_sports")
+    pure = sorted(g for g, v in results.items() if v == VERDICT_PURE_SPORTS)
+    mixed = sorted(g for g, v in results.items() if v == VERDICT_MIXED)
+    not_sports = sorted(g for g, v in results.items() if v == VERDICT_NOT_SPORTS)
     msg = (
         f"Classified {len(results)}: pure_sports={len(pure)}, "
         f"mixed={len(mixed)}, not_sports={len(not_sports)}. "
@@ -255,14 +293,12 @@ def _action_classify(settings: Dict[str, Any]) -> Dict[str, Any]:
 
 def _action_refine_mixed(settings: Dict[str, Any]) -> Dict[str, Any]:
     from . import classifier
-    account_id = int(settings.get("m3u_account_id", 2))
-    model = settings.get("model", "claude-haiku-4-5")
-    debug = bool(settings.get("debug_mode", False))
-    if debug:
-        logging.getLogger("plugins.dispatcharr_sports_filter").setLevel(logging.DEBUG)
+    _apply_debug_logging(settings)
+    account_id = _resolve_account_id(settings)
+    model = _resolve_model(settings)
 
     cache = _read_group_cache()
-    mixed_groups = sorted(g for g, v in cache.items() if v == "mixed")
+    mixed_groups = sorted(g for g, v in cache.items() if v == VERDICT_MIXED)
     if not mixed_groups:
         return {"status": "ok", "message": "No groups marked 'mixed' in cache. Run classify first."}
 
@@ -299,32 +335,32 @@ def _action_refine_mixed(settings: Dict[str, Any]) -> Dict[str, Any]:
     # Build per-group summary
     summary = {}
     for group_name, streams in per_group_streams.items():
-        sport_streams = [s for s in streams if stream_cache.get(s) == "sports"]
+        sport_streams = [s for s in streams if stream_cache.get(s) == VERDICT_SPORTS]
         summary[group_name] = {"total": len(streams), "sports": len(sport_streams)}
 
     # Auto-reclassify mixed groups based on per-stream findings:
-    #   0 sports streams      -> demote to 'not_sports' (unselected on next apply)
-    #   100% sports streams   -> promote to 'pure_sports' (no regex filter needed)
-    #   anything in between   -> stay 'mixed' (regex filter applied on apply)
+    #   0 sports streams      -> demote to not_sports (unselected on next apply)
+    #   100% sports streams   -> promote to pure_sports (no regex filter needed)
+    #   anything in between   -> stay mixed (regex filter applied on apply)
     # This makes refine_mixed a verification pass: the cheap group-level LLM is
     # rough; the exhaustive stream-level pass produces the final verdict.
     cache = _read_group_cache()
     demoted: List[str] = []
     promoted: List[str] = []
     for group_name, s in summary.items():
-        if cache.get(group_name) != "mixed":
+        if cache.get(group_name) != VERDICT_MIXED:
             continue
         sports, total = s["sports"], s["total"]
         if total == 0:
             continue
         if sports == 0:
-            cache[group_name] = "not_sports"
+            cache[group_name] = VERDICT_NOT_SPORTS
             demoted.append(group_name)
-            summary[group_name]["reclassified_to"] = "not_sports"
+            summary[group_name]["reclassified_to"] = VERDICT_NOT_SPORTS
         elif sports == total:
-            cache[group_name] = "pure_sports"
+            cache[group_name] = VERDICT_PURE_SPORTS
             promoted.append(group_name)
-            summary[group_name]["reclassified_to"] = "pure_sports"
+            summary[group_name]["reclassified_to"] = VERDICT_PURE_SPORTS
     if demoted or promoted:
         _write_json(CACHE_PATH, cache)
         if demoted:
@@ -359,14 +395,12 @@ def _action_refine_mixed(settings: Dict[str, Any]) -> Dict[str, Any]:
 def _action_apply(settings: Dict[str, Any]) -> Dict[str, Any]:
     from apps.channels.models import ChannelGroupM3UAccount
 
-    account_id = int(settings.get("m3u_account_id", 2))
-    profile_id = int(settings.get("channel_profile_id", 2))
+    _apply_debug_logging(settings)
+    account_id = _resolve_account_id(settings)
+    profile_id = _resolve_profile_id(settings)
     dry_run = bool(settings.get("dry_run", True))
     also_unselect = bool(settings.get("also_unselect_not_sports", False))
     apply_rename = bool(settings.get("apply_group_rename", True))
-    debug = bool(settings.get("debug_mode", False))
-    if debug:
-        logging.getLogger("plugins.dispatcharr_sports_filter").setLevel(logging.DEBUG)
 
     cache = _read_group_cache()
     if not cache:
@@ -394,26 +428,30 @@ def _action_apply(settings: Dict[str, Any]) -> Dict[str, Any]:
             skipped_unknown.append(name)
             continue
 
-        if verdict in ("pure_sports", "mixed"):
+        if verdict in (VERDICT_PURE_SPORTS, VERDICT_MIXED):
             target_props = dict(r.custom_properties or {})
             target_props["channel_numbering_mode"] = "next_available"
             target_props["channel_profile_ids"] = [profile_id]
 
-            # Group rename via group_override
+            # Group rename via group_override.
+            # Dry-run case: the target may not exist yet, so we surface a
+            # "<would-create:NAME>" marker in the output so the user can preview.
+            # _get_or_create_target_group only returns None when dry_run=True and
+            # the group is missing, so the placeholder branch is unreachable on a
+            # real apply.
             if apply_rename:
-                clean = _clean_target_name(name, is_mixed=(verdict == "mixed"))
+                clean = _clean_target_name(name, is_mixed=(verdict == VERDICT_MIXED))
                 if clean != name:
                     target_group = _get_or_create_target_group(clean, dry_run)
                     if target_group:
                         target_props["group_override"] = target_group.id
                     elif dry_run:
-                        # would-create marker for dry-run output
                         target_props["group_override"] = f"<would-create:{clean}>"
 
             # Per-stream filter for mixed groups
-            if verdict == "mixed":
+            if verdict == VERDICT_MIXED:
                 streams = _gather_streams_for_group(account_id, name)
-                sport_streams = [s for s in streams if stream_cache.get(s) == "sports"]
+                sport_streams = [s for s in streams if stream_cache.get(s) == VERDICT_SPORTS]
                 if sport_streams:
                     target_props["name_match_regex"] = _build_match_regex(sport_streams)
                     mixed_applied.append({
@@ -443,15 +481,11 @@ def _action_apply(settings: Dict[str, Any]) -> Dict[str, Any]:
                 no_change_on += 1
                 continue
 
-            if verdict == "pure_sports":
+            if verdict == VERDICT_PURE_SPORTS:
                 pure_applied.append(name)
             # (mixed already added above)
 
             if not dry_run:
-                # If we used a placeholder during dry_run path that bled through, skip override
-                go = target_props.get("group_override")
-                if isinstance(go, str) and go.startswith("<would-create:"):
-                    target_props.pop("group_override", None)
                 r.auto_channel_sync = True
                 r.custom_properties = target_props
                 r.save(update_fields=["auto_channel_sync", "custom_properties"])
@@ -559,11 +593,12 @@ def _action_cleanup_orphans(settings: Dict[str, Any]) -> Dict[str, Any]:
 
     dry_run = bool(settings.get("dry_run", True))
 
-    # Build set of group ids actively referenced as group_override
+    # Build set of group ids actively referenced as group_override.
+    # Pull only custom_properties (one column) instead of hydrating each row -
+    # cuts work on installs with thousands of CGM3UA rows.
     override_ids = set()
-    for r in ChannelGroupM3UAccount.objects.exclude(custom_properties=None):
-        cp = r.custom_properties or {}
-        go = cp.get("group_override")
+    for cp in ChannelGroupM3UAccount.objects.exclude(custom_properties=None).values_list("custom_properties", flat=True):
+        go = (cp or {}).get("group_override")
         if isinstance(go, int):
             override_ids.add(go)
 
@@ -613,16 +648,16 @@ def _action_cleanup_orphans(settings: Dict[str, Any]) -> Dict[str, Any]:
 
 def _action_show_status(settings: Dict[str, Any]) -> Dict[str, Any]:
     from apps.channels.models import ChannelGroupM3UAccount
-    account_id = int(settings.get("m3u_account_id", 2))
+    account_id = _resolve_account_id(settings)
     cache = _read_group_cache()
     stream_cache = _read_stream_cache()
     rels = ChannelGroupM3UAccount.objects.filter(m3u_account_id=account_id)
     enabled = rels.filter(enabled=True).count()
     syncing = rels.filter(enabled=True, auto_channel_sync=True).count()
-    pure = sum(1 for v in cache.values() if v == "pure_sports")
-    mixed = sum(1 for v in cache.values() if v == "mixed")
-    notsp = sum(1 for v in cache.values() if v == "not_sports")
-    sport_streams = sum(1 for v in stream_cache.values() if v == "sports")
+    pure = sum(1 for v in cache.values() if v == VERDICT_PURE_SPORTS)
+    mixed = sum(1 for v in cache.values() if v == VERDICT_MIXED)
+    notsp = sum(1 for v in cache.values() if v == VERDICT_NOT_SPORTS)
+    sport_streams = sum(1 for v in stream_cache.values() if v == VERDICT_SPORTS)
     msg = (
         f"Acct {account_id}: total_rels={rels.count()} enabled={enabled} syncing={syncing}. "
         f"Group cache: pure_sports={pure}, mixed={mixed}, not_sports={notsp}. "
@@ -656,12 +691,11 @@ def _try_acquire_scheduler_lock() -> bool:
     try:
         from core.utils import RedisClient
         rc = RedisClient.get_client()
-        # 30 min TTL — enough margin for a full pipeline run on first invocation
         return bool(rc.set(
-            "plugins:sports_filter:auto_pipeline:lock",
+            SCHEDULER_LOCK_KEY,
             f"pid={os.getpid()}",
             nx=True,
-            ex=1800,
+            ex=SCHEDULER_LOCK_TTL_S,
         ))
     except Exception as e:
         logger.warning("[sports_filter] redis lock check failed (running anyway): %s", e)
@@ -672,7 +706,7 @@ def _release_scheduler_lock() -> None:
     try:
         from core.utils import RedisClient
         rc = RedisClient.get_client()
-        rc.delete("plugins:sports_filter:auto_pipeline:lock")
+        rc.delete(SCHEDULER_LOCK_KEY)
     except Exception:
         pass
 
@@ -757,7 +791,7 @@ def _build_account_field():
         logger.warning("[sports_filter] Could not query M3UAccount for dropdown: %s", e)
     return {
         "id": "m3u_account_id", "type": "number", "label": "M3U Account ID",
-        "default": 2,
+        "default": DEFAULT_ACCOUNT_ID,
         "help_text": "Database ID of the M3U account.",
     }
 
@@ -779,15 +813,29 @@ def _build_profile_field():
         logger.warning("[sports_filter] Could not query ChannelProfile for dropdown: %s", e)
     return {
         "id": "channel_profile_id", "type": "number", "label": "Channel Profile ID for sports",
-        "default": 2,
+        "default": DEFAULT_PROFILE_ID,
         "help_text": "Database ID of the ChannelProfile.",
     }
+
+
+_REPO_URL = "https://github.com/Jacob-Lasky/dispatcharr_sports_filter"
+
+# action id -> handler. Single source of truth used by Plugin.run dispatch.
+# Keep in sync with self.actions (UI manifest).
+ACTION_HANDLERS: Dict[str, Callable[[Dict[str, Any]], Dict[str, Any]]] = {
+    "classify": _action_classify,
+    "refine_mixed": _action_refine_mixed,
+    "apply": _action_apply,
+    "cleanup_orphans": _action_cleanup_orphans,
+    "auto_pipeline": _action_auto_pipeline,
+    "show_status": _action_show_status,
+}
 
 
 class Plugin:
     def __init__(self):
         self.name = "Sports-Only Group Filter"
-        self.version = "0.5.0"
+        self.version = PLUGIN_VERSION
         self.description = (
             "Three-bucket M3U group filter (pure_sports / mixed / not_sports). "
             "Per-stream filtering for mixed bouquets via name_match_regex. "
@@ -795,21 +843,27 @@ class Plugin:
             "Claude LLM for ambiguous classification."
         )
         self.author = "Jake (with Claude)"
-        self.url = "https://github.com/jacob-lasky/dispatcharr-sports-filter"
+        self.url = _REPO_URL
 
+        # NOTE: this self.fields list intentionally restates the static fields
+        # from plugin.json. Dispatcharr's plugin loader hydrates dynamic dropdown
+        # options (m3u_account_id, channel_profile_id) from this Python-side
+        # build because plugin.json has no DB access. The static defaults below
+        # must stay in sync with plugin.json; both are sourced from constants.py
+        # so the duplication is shallow.
         self.fields = [
             _build_account_field(),
             _build_profile_field(),
             {
                 "id": "model", "type": "select", "label": "Claude model",
-                "default": "claude-haiku-4-5",
+                "default": DEFAULT_MODEL,
                 "options": [
                     {"value": "claude-haiku-4-5", "label": "Claude Haiku 4.5 (cheap, fast)"},
                     {"value": "claude-sonnet-4-6", "label": "Claude Sonnet 4.6"},
                     {"value": "claude-opus-4-7", "label": "Claude Opus 4.7"},
                 ],
             },
-            {"id": "samples_per_group", "type": "number", "label": "Sample channels per group", "default": 6},
+            {"id": "samples_per_group", "type": "number", "label": "Sample channels per group", "default": DEFAULT_SAMPLES_PER_GROUP},
             {"id": "dry_run", "type": "boolean", "label": "Dry run on Apply", "default": True},
             {
                 "id": "auto_pipeline_enabled", "type": "boolean",
@@ -873,18 +927,10 @@ class Plugin:
         if params:
             settings.update(params)
         try:
-            if action == "classify":
-                return _action_classify(settings)
-            if action == "refine_mixed":
-                return _action_refine_mixed(settings)
-            if action == "apply":
-                return _action_apply(settings)
-            if action == "cleanup_orphans":
-                return _action_cleanup_orphans(settings)
-            if action == "auto_pipeline":
-                return _action_auto_pipeline(settings)
-            if action == "show_status":
-                return _action_show_status(settings)
+            handler = ACTION_HANDLERS.get(action or "")
+            if handler is not None:
+                return handler(settings)
+            # Lifecycle hooks Dispatcharr calls outside the user-action surface.
             if action == "enable":
                 _start_scheduler()
                 return {"status": "ok", "message": "scheduler started"}
