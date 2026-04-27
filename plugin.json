@@ -13,7 +13,10 @@
       "label": "M3U Account scope",
       "default": "0",
       "options": [
-        {"value": "0", "label": "All M3U accounts"}
+        {
+          "value": "0",
+          "label": "All M3U accounts"
+        }
       ],
       "help_text": "Default 'All M3U accounts' classifies + applies across every enabled provider. Pick a single account only to scope the plugin to one provider. Populated dynamically from the DB at plugin load — restart Dispatcharr if you add a new M3U account."
     },
@@ -24,6 +27,62 @@
       "default": "1",
       "options": [],
       "help_text": "Populated dynamically from the DB at plugin load."
+    },
+    {
+      "id": "enable_llm",
+      "type": "boolean",
+      "label": "Use LLM for ambiguous classification",
+      "default": false,
+      "help_text": "OFF by default (regex-only mode): no API key needed, no per-call cost, no third-party network traffic. Ambiguous group names default to 'not_sports'; tune via extra_allow_terms / extra_deny_terms. Turn ON to send ambiguous bouquets to the configured LLM (Anthropic / OpenAI / Google — pick via 'LLM model') AND get per-stream classification of mixed bouquets — requires the matching API key."
+    },
+    {
+      "id": "model",
+      "type": "select",
+      "label": "LLM model",
+      "default": "claude-haiku-4-5",
+      "options": [
+        {
+          "value": "claude-haiku-4-5",
+          "label": "Anthropic — Claude Haiku 4.5 (cheap, fast)"
+        },
+        {
+          "value": "claude-sonnet-4-6",
+          "label": "Anthropic — Claude Sonnet 4.6"
+        },
+        {
+          "value": "claude-opus-4-7",
+          "label": "Anthropic — Claude Opus 4.7"
+        },
+        {
+          "value": "gpt-4o-mini",
+          "label": "OpenAI — GPT-4o mini (cheap, fast)"
+        },
+        {
+          "value": "gpt-4.1-mini",
+          "label": "OpenAI — GPT-4.1 mini"
+        },
+        {
+          "value": "gpt-4.1",
+          "label": "OpenAI — GPT-4.1"
+        },
+        {
+          "value": "gpt-4o",
+          "label": "OpenAI — GPT-4o"
+        },
+        {
+          "value": "gemini-2.0-flash",
+          "label": "Google — Gemini 2.0 Flash (cheap, fast)"
+        },
+        {
+          "value": "gemini-2.5-flash",
+          "label": "Google — Gemini 2.5 Flash"
+        },
+        {
+          "value": "gemini-2.5-pro",
+          "label": "Google — Gemini 2.5 Pro"
+        }
+      ],
+      "help_text": "Provider is inferred from the model prefix: claude-* → Anthropic, gpt-* / o1-* / o3-* → OpenAI, gemini-* → Google. Make sure the matching API key field above is set."
     },
     {
       "id": "anthropic_api_key",
@@ -50,32 +109,6 @@
       "help_text": "Masked in the UI. If blank, falls back to <plugin_dir>/gemini_api_key on disk (chmod 600). Required when 'LLM model' is set to a Gemini (gemini-*) model."
     },
     {
-      "id": "model",
-      "type": "select",
-      "label": "LLM model",
-      "default": "claude-haiku-4-5",
-      "options": [
-        {"value": "claude-haiku-4-5", "label": "Anthropic — Claude Haiku 4.5 (cheap, fast)"},
-        {"value": "claude-sonnet-4-6", "label": "Anthropic — Claude Sonnet 4.6"},
-        {"value": "claude-opus-4-7", "label": "Anthropic — Claude Opus 4.7"},
-        {"value": "gpt-4o-mini", "label": "OpenAI — GPT-4o mini (cheap, fast)"},
-        {"value": "gpt-4.1-mini", "label": "OpenAI — GPT-4.1 mini"},
-        {"value": "gpt-4.1", "label": "OpenAI — GPT-4.1"},
-        {"value": "gpt-4o", "label": "OpenAI — GPT-4o"},
-        {"value": "gemini-2.0-flash", "label": "Google — Gemini 2.0 Flash (cheap, fast)"},
-        {"value": "gemini-2.5-flash", "label": "Google — Gemini 2.5 Flash"},
-        {"value": "gemini-2.5-pro", "label": "Google — Gemini 2.5 Pro"}
-      ],
-      "help_text": "Provider is inferred from the model prefix: claude-* → Anthropic, gpt-* / o1-* / o3-* → OpenAI, gemini-* → Google. Make sure the matching API key field above is set."
-    },
-    {
-      "id": "samples_per_group",
-      "type": "number",
-      "label": "Sample channels per group",
-      "default": 6,
-      "help_text": "How many channel names to include per group as context for the LLM."
-    },
-    {
       "id": "dry_run",
       "type": "boolean",
       "label": "Dry run on Apply",
@@ -83,11 +116,11 @@
       "help_text": "When true, 'Apply' logs intended changes but does not write to the DB. Disable once you trust the output."
     },
     {
-      "id": "enable_llm",
-      "type": "boolean",
-      "label": "Use LLM for ambiguous classification",
-      "default": false,
-      "help_text": "OFF by default (regex-only mode): no API key needed, no per-call cost, no third-party network traffic. Ambiguous group names default to 'not_sports'; tune via extra_allow_terms / extra_deny_terms. Turn ON to send ambiguous bouquets to the configured LLM (Anthropic / OpenAI / Google — pick via 'LLM model') AND get per-stream classification of mixed bouquets — requires the matching API key."
+      "id": "samples_per_group",
+      "type": "number",
+      "label": "Sample channels per group",
+      "default": 6,
+      "help_text": "How many channel names to include per group as context for the LLM."
     },
     {
       "id": "extra_allow_terms",
@@ -109,20 +142,6 @@
       "label": "Extra LLM classification hints",
       "default": "",
       "help_text": "Free-text instructions appended to the LLM system prompt for borderline groups/streams. Example: 'Treat motorsport documentaries as sports. Treat fishing channels as not_sports.'"
-    },
-    {
-      "id": "auto_pipeline_enabled",
-      "type": "boolean",
-      "label": "Auto-run pipeline on schedule",
-      "default": false,
-      "help_text": "Off by default. When on, the plugin runs classify -> refine_mixed -> apply -> cleanup_orphans at every clock time listed in the schedule below. Enable only after you have reviewed dry-run output and trust the cache."
-    },
-    {
-      "id": "auto_pipeline_schedule",
-      "type": "string",
-      "label": "Schedule (clock times, comma-separated)",
-      "default": "0300",
-      "help_text": "Comma-separated list of clock times (server local time) when the auto-pipeline fires. Default '0300' is daily at 3 AM. Multi-times-per-day examples: '0000,0600,1200,1800' (every 6h) or '0300,1500' (every 12h). Both 'HHMM' and 'HH:MM' forms work; whitespace is ignored. Invalid entries are skipped with a warning."
     },
     {
       "id": "apply_group_rename",
@@ -151,6 +170,20 @@
       "label": "Also unselect not_sports groups",
       "default": false,
       "help_text": "Stronger than auto_channel_sync=False: also flips 'enabled' off, so the M3U import skips the group entirely. Warning: orphans existing channels that pull streams only from those groups."
+    },
+    {
+      "id": "auto_pipeline_enabled",
+      "type": "boolean",
+      "label": "Auto-run pipeline on schedule",
+      "default": false,
+      "help_text": "Off by default. When on, the plugin runs classify -> refine_mixed -> apply -> cleanup_orphans at every clock time listed in the schedule below. Enable only after you have reviewed dry-run output and trust the cache."
+    },
+    {
+      "id": "auto_pipeline_schedule",
+      "type": "string",
+      "label": "Schedule (clock times, comma-separated)",
+      "default": "0300",
+      "help_text": "Comma-separated list of clock times (server local time) when the auto-pipeline fires. Default '0300' is daily at 3 AM. Multi-times-per-day examples: '0000,0600,1200,1800' (every 6h) or '0300,1500' (every 12h). Both 'HHMM' and 'HH:MM' forms work; whitespace is ignored. Invalid entries are skipped with a warning."
     },
     {
       "id": "debug_mode",

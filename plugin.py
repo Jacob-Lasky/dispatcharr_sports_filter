@@ -1084,23 +1084,20 @@ class Plugin:
         # build because plugin.json has no DB access. The static defaults below
         # must stay in sync with plugin.json; both are sourced from constants.py
         # so the duplication is shallow.
+        # Field order is user-journey-driven, not alphabetical: basics every
+        # user touches go first, advanced tuners later. Keep this in sync with
+        # plugin.json — the test_plugin_json_and_python_fields_agree_on_ids
+        # contract enforces ID parity (it does NOT enforce order, but humans
+        # reading both files benefit from matching order).
         self.fields = [
+            # ----- Basics: every user touches these on first setup -----
             _build_account_field(),
             _build_profile_field(),
             {
-                "id": "anthropic_api_key", "type": "string", "input_type": "password",
-                "label": "Anthropic API key", "default": "",
-                "help_text": "Masked in the UI. If blank, falls back to <plugin_dir>/anthropic_api_key on disk (chmod 600). Required when 'LLM model' is set to a Claude (claude-*) model.",
-            },
-            {
-                "id": "openai_api_key", "type": "string", "input_type": "password",
-                "label": "OpenAI API key", "default": "",
-                "help_text": "Masked in the UI. If blank, falls back to <plugin_dir>/openai_api_key on disk (chmod 600). Required when 'LLM model' is set to an OpenAI (gpt-*, o1-*, o3-*) model.",
-            },
-            {
-                "id": "gemini_api_key", "type": "string", "input_type": "password",
-                "label": "Google Gemini API key", "default": "",
-                "help_text": "Masked in the UI. If blank, falls back to <plugin_dir>/gemini_api_key on disk (chmod 600). Required when 'LLM model' is set to a Gemini (gemini-*) model.",
+                "id": "enable_llm", "type": "boolean",
+                "label": "Use LLM for ambiguous classification",
+                "default": False,
+                "help_text": "OFF by default (regex-only mode): no API key needed, no per-call cost, no third-party network traffic. Ambiguous group names default to 'not_sports'; tune via extra_allow_terms / extra_deny_terms. Turn ON to send ambiguous bouquets to the configured LLM (Anthropic / OpenAI / Google — pick via 'LLM model') AND get per-stream classification of mixed bouquets — requires the matching API key.",
             },
             {
                 "id": "model", "type": "select", "label": "LLM model",
@@ -1123,18 +1120,27 @@ class Plugin:
                 "help_text": (
                     "Provider is inferred from the model prefix: claude-* -> Anthropic, "
                     "gpt-* / o1-* / o3-* -> OpenAI, gemini-* -> Google. Make sure the "
-                    "matching API key is configured (see anthropic_api_key / "
-                    "openai_api_key / gemini_api_key fields)."
+                    "matching API key field below is set."
                 ),
             },
-            {"id": "samples_per_group", "type": "number", "label": "Sample channels per group", "default": DEFAULT_SAMPLES_PER_GROUP},
-            {"id": "dry_run", "type": "boolean", "label": "Dry run on Apply", "default": True},
             {
-                "id": "enable_llm", "type": "boolean",
-                "label": "Use LLM for ambiguous classification",
-                "default": False,
-                "help_text": "OFF by default (regex-only mode): no API key needed, no per-call cost, no third-party network traffic. Ambiguous group names default to 'not_sports'; tune via extra_allow_terms / extra_deny_terms. Turn ON to send ambiguous bouquets to the configured LLM (Anthropic / OpenAI / Google — pick via 'LLM model') AND get per-stream classification of mixed bouquets — requires the matching API key.",
+                "id": "anthropic_api_key", "type": "string", "input_type": "password",
+                "label": "Anthropic API key", "default": "",
+                "help_text": "Masked in the UI. If blank, falls back to <plugin_dir>/anthropic_api_key on disk (chmod 600). Required when 'LLM model' is set to a Claude (claude-*) model.",
             },
+            {
+                "id": "openai_api_key", "type": "string", "input_type": "password",
+                "label": "OpenAI API key", "default": "",
+                "help_text": "Masked in the UI. If blank, falls back to <plugin_dir>/openai_api_key on disk (chmod 600). Required when 'LLM model' is set to an OpenAI (gpt-*, o1-*, o3-*) model.",
+            },
+            {
+                "id": "gemini_api_key", "type": "string", "input_type": "password",
+                "label": "Google Gemini API key", "default": "",
+                "help_text": "Masked in the UI. If blank, falls back to <plugin_dir>/gemini_api_key on disk (chmod 600). Required when 'LLM model' is set to a Gemini (gemini-*) model.",
+            },
+            {"id": "dry_run", "type": "boolean", "label": "Dry run on Apply", "default": True},
+            # ----- LLM tuning (skip unless you want to refine output) -----
+            {"id": "samples_per_group", "type": "number", "label": "Sample channels per group", "default": DEFAULT_SAMPLES_PER_GROUP},
             {
                 "id": "extra_allow_terms", "type": "string",
                 "label": "Extra allow keywords",
@@ -1153,18 +1159,7 @@ class Plugin:
                 "default": "",
                 "help_text": "Free-text instructions appended to the LLM system prompt for borderline groups/streams. Example: 'Treat motorsport documentaries as sports. Treat fishing channels as not_sports.'",
             },
-            {
-                "id": "auto_pipeline_enabled", "type": "boolean",
-                "label": "Auto-run pipeline on schedule",
-                "default": False,
-                "help_text": "Off by default. When on, the plugin runs classify -> refine_mixed -> apply -> cleanup_orphans at every clock time listed in the schedule below. Enable only after you have reviewed dry-run output and trust the cache. Cache makes subsequent runs cheap; only new groups/streams hit the LLM.",
-            },
-            {
-                "id": "auto_pipeline_schedule", "type": "string",
-                "label": "Schedule (clock times, comma-separated)",
-                "default": DEFAULT_SCHEDULE_STRING,
-                "help_text": "Comma-separated list of clock times (server local time) when the auto-pipeline fires. Default '0300' is daily at 3 AM. Multi-times-per-day examples: '0000,0600,1200,1800' (every 6h) or '0300,1500' (every 12h). Both 'HHMM' and 'HH:MM' forms work; whitespace is ignored. Invalid entries are skipped with a warning.",
-            },
+            # ----- Apply customization (rename + selection knobs) -----
             {
                 "id": "apply_group_rename", "type": "boolean",
                 "label": "Apply group rename (group_override) on Apply",
@@ -1189,6 +1184,20 @@ class Plugin:
                 "default": False,
                 "help_text": "Stronger than auto_channel_sync=False: also flips 'enabled' off, so the M3U import skips the group entirely. Warning: orphans existing channels that pull streams only from those groups.",
             },
+            # ----- Automation (off by default, opt-in only) -----
+            {
+                "id": "auto_pipeline_enabled", "type": "boolean",
+                "label": "Auto-run pipeline on schedule",
+                "default": False,
+                "help_text": "Off by default. When on, the plugin runs classify -> refine_mixed -> apply -> cleanup_orphans at every clock time listed in the schedule below. Enable only after you have reviewed dry-run output and trust the cache. Cache makes subsequent runs cheap; only new groups/streams hit the LLM.",
+            },
+            {
+                "id": "auto_pipeline_schedule", "type": "string",
+                "label": "Schedule (clock times, comma-separated)",
+                "default": DEFAULT_SCHEDULE_STRING,
+                "help_text": "Comma-separated list of clock times (server local time) when the auto-pipeline fires. Default '0300' is daily at 3 AM. Multi-times-per-day examples: '0000,0600,1200,1800' (every 6h) or '0300,1500' (every 12h). Both 'HHMM' and 'HH:MM' forms work; whitespace is ignored. Invalid entries are skipped with a warning.",
+            },
+            # ----- Debug -----
             {"id": "debug_mode", "type": "boolean", "label": "Debug logging", "default": False},
         ]
         self.actions = [
