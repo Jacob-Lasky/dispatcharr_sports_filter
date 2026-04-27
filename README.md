@@ -101,10 +101,13 @@ group names and the noise stripped out.
   also flips `enabled=False`, so the M3U import skips the group entirely.
   Warning: orphans existing channels that pull streams only from those
   groups.
-- `auto_pipeline_enabled` + `hour` + `minute` — daily scheduler.
-  **Off by default** as of 0.6.0 — enable only after you have reviewed
-  dry-run output and trust the cache. Cache makes subsequent runs near-free
-  since only new groups/streams hit the LLM.
+- `auto_pipeline_enabled` + `auto_pipeline_schedule` — scheduler. **Off
+  by default** — enable only after you have reviewed dry-run output and
+  trust the cache. The schedule is a comma-separated list of clock times
+  in server local time: default `"0300"` runs daily at 3 AM,
+  `"0000,0600,1200,1800"` runs every 6 hours, etc. Both `HHMM` and
+  `HH:MM` forms accepted. Cache makes subsequent runs near-free since
+  only new groups/streams hit the LLM.
 
 ## Tested against
 

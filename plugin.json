@@ -1,6 +1,6 @@
 {
   "name": "Sports-Only Group Filter",
-  "version": "0.7.1",
+  "version": "0.8.0",
   "description": "3-bucket classifier (pure_sports/mixed/not_sports) + per-stream filter for mixed bouquets via name_match_regex + auto-rename source groups via group_override. Anthropic key configurable in settings, or via <plugin_dir>/anthropic_api_key on disk.",
   "author": "Jake (with Claude)",
   "license": "MIT",
@@ -90,23 +90,16 @@
     {
       "id": "auto_pipeline_enabled",
       "type": "boolean",
-      "label": "Daily auto-run pipeline",
+      "label": "Auto-run pipeline on schedule",
       "default": false,
-      "help_text": "Off by default. When on, the plugin runs classify -> refine_mixed -> apply -> cleanup_orphans once per day at the configured hour. Enable only after you have reviewed dry-run output and trust the cache."
+      "help_text": "Off by default. When on, the plugin runs classify -> refine_mixed -> apply -> cleanup_orphans at every clock time listed in the schedule below. Enable only after you have reviewed dry-run output and trust the cache."
     },
     {
-      "id": "auto_pipeline_hour",
-      "type": "number",
-      "label": "Daily run hour (0-23, server local time)",
-      "default": 3,
-      "help_text": "Hour of day (24h) the auto-pipeline fires. Default 3 = 3 AM."
-    },
-    {
-      "id": "auto_pipeline_minute",
-      "type": "number",
-      "label": "Daily run minute (0-59)",
-      "default": 0,
-      "help_text": "Minute of the hour the auto-pipeline fires."
+      "id": "auto_pipeline_schedule",
+      "type": "string",
+      "label": "Schedule (clock times, comma-separated)",
+      "default": "0300",
+      "help_text": "Comma-separated list of clock times (server local time) when the auto-pipeline fires. Default '0300' is daily at 3 AM. Multi-times-per-day examples: '0000,0600,1200,1800' (every 6h) or '0300,1500' (every 12h). Both 'HHMM' and 'HH:MM' forms work; whitespace is ignored. Invalid entries are skipped with a warning."
     },
     {
       "id": "apply_group_rename",

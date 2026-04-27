@@ -2,6 +2,46 @@
 
 All notable changes to this plugin are documented here.
 
+## [0.8.0] — 2026-04-27 — scheduler redesign
+
+The scheduler accepted only a single hour + minute. That made
+'every 6 hours' or 'twice a day' impossible without code changes. Two
+fields collapsed into one schedule string.
+
+### Field changes (breaking, but no existing public users)
+
+- **Removed**: `auto_pipeline_hour`, `auto_pipeline_minute`.
+- **Added**: `auto_pipeline_schedule` (string, default `"0300"`).
+  Comma-separated list of clock times in server local time. Both
+  `HHMM` (`0300`, `1830`) and `HH:MM` (`03:00`, `18:30`) accepted;
+  bare hours (`3`, `18`) treated as `HH:00`. Whitespace ignored,
+  duplicates collapsed.
+- Examples:
+  - `"0300"` — daily at 3 AM (default, preserves prior 0.7.x behavior).
+  - `"0000,0600,1200,1800"` — every 6 hours.
+  - `"0300,1500"` — every 12 hours.
+
+### Mechanics
+
+- `_parse_schedule(raw)` — generous parser, strict validator. Invalid
+  entries log a warning and are skipped. If every entry is invalid,
+  falls back to default `0300` so the scheduler does not starve.
+- `_next_firing(now, schedule)` — returns the next datetime strictly
+  AFTER `now`, wrapping to tomorrow's earliest if all of today's times
+  are in the past. Strictly-after means a scheduler that fires at
+  `03:00:00` and recomputes at `03:00:01` does not loop on the same
+  time.
+- Old `auto_pipeline_hour=3, auto_pipeline_minute=0` saved settings
+  are silently ignored. Anyone upgrading from 0.6.x or 0.7.x sees
+  default `0300` (same effective time as the old default).
+
+### Tests
+
+- 32 new tests in `tests/test_schedule.py` covering parser edge cases
+  (HHMM, HH:MM, bare hours, 3-digit, whitespace, duplicates, invalid),
+  next-firing behavior (today-future, exact-match, multi-time, wrap),
+  and a manifest contract that pins the field swap.
+
 ## [0.7.1] — 2026-04-27 — auto_pipeline hotfix
 
 `auto_pipeline` errored at runtime with `NameError: name 'debug' is not

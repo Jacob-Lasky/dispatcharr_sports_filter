@@ -56,7 +56,7 @@ from .constants import (
     VERDICT_SPORTS,
 )
 
-PLUGIN_VERSION = "0.7.1"
+PLUGIN_VERSION = "0.8.0"
 
 logger = logging.getLogger(LOGGER_NAME)
 
@@ -778,6 +778,76 @@ def _action_show_status(settings: Dict[str, Any]) -> Dict[str, Any]:
     return {"status": "ok", "message": msg}
 
 
+# ---------- Schedule parsing ----------
+
+DEFAULT_SCHEDULE_TIMES = ((3, 0),)  # 0300 daily — preserves prior default
+
+
+def _parse_schedule(raw: object) -> List[tuple]:
+    """Parse comma-separated clock times into a sorted, de-duplicated list of
+    (hour, minute) tuples. Generous parser, strict validator:
+      - 'HHMM'   ('0300', '1830')
+      - 'HH:MM'  ('03:00', '18:30')
+      - 'H:MM'   ('3:00')
+      - 'HH'     ('3', '03') treated as HH:00
+    Whitespace anywhere is ignored. Invalid entries log a warning and are
+    skipped. If nothing parses, falls back to the default 0300.
+
+    Returns the times sorted ascending; the scheduler walks this to find
+    the next firing time after `now`.
+    """
+    if raw is None:
+        return list(DEFAULT_SCHEDULE_TIMES)
+    text = str(raw).strip()
+    if not text:
+        return list(DEFAULT_SCHEDULE_TIMES)
+
+    out: List[tuple] = []
+    for tok in re.split(r"[,\s]+", text):
+        if not tok:
+            continue
+        clean = tok.replace(":", "").strip()
+        if not clean.isdigit():
+            logger.warning("[sports_filter] schedule entry %r is not numeric, skipping", tok)
+            continue
+        if len(clean) <= 2:
+            h, m = int(clean), 0
+        elif len(clean) == 3:
+            h, m = int(clean[0]), int(clean[1:])
+        elif len(clean) == 4:
+            h, m = int(clean[:2]), int(clean[2:])
+        else:
+            logger.warning("[sports_filter] schedule entry %r has too many digits, skipping", tok)
+            continue
+        if not (0 <= h <= 23 and 0 <= m <= 59):
+            logger.warning("[sports_filter] schedule entry %r out of range (00:00-23:59), skipping", tok)
+            continue
+        out.append((h, m))
+
+    if not out:
+        logger.warning(
+            "[sports_filter] schedule %r had no valid entries, falling back to default %s",
+            text, DEFAULT_SCHEDULE_TIMES,
+        )
+        return list(DEFAULT_SCHEDULE_TIMES)
+    return sorted(set(out))
+
+
+def _next_firing(now: datetime, schedule: List[tuple]) -> datetime:
+    """Given a sorted list of (hour, minute) tuples, return the next datetime
+    strictly after `now`. Wraps to tomorrow's earliest if all of today's
+    times are already past. Caller is responsible for ensuring `schedule`
+    is non-empty (use _parse_schedule which guarantees it).
+    """
+    base = now.replace(second=0, microsecond=0)
+    candidates = [base.replace(hour=h, minute=m) for h, m in schedule]
+    future = [c for c in candidates if c > now]
+    if future:
+        return future[0]
+    h, m = schedule[0]
+    return (base + timedelta(days=1)).replace(hour=h, minute=m)
+
+
 # ---------- Background scheduler ----------
 
 _SCHEDULER_LOCK = threading.Lock()
@@ -823,26 +893,30 @@ def _release_scheduler_lock() -> None:
 
 
 def _scheduler_loop() -> None:
-    """Wake daily at the configured hour:minute and run the auto_pipeline."""
+    """Wake at each configured clock time and run the auto_pipeline.
+
+    The schedule is a comma-separated list of clock times (e.g. '0300' for
+    daily 3 AM, '0000,0600,1200,1800' for every 6 hours). Each loop
+    iteration computes the next firing time strictly after `now`,
+    sleeps until then, then runs the pipeline.
+    """
     logger.info("[sports_filter] scheduler thread started (pid=%d)", os.getpid())
     while not _SCHEDULER_STOP.is_set():
         try:
             settings = _read_persisted_settings()
-            if not settings.get("auto_pipeline_enabled", True):
+            if not settings.get("auto_pipeline_enabled", False):
                 # Setting flipped off — recheck in 5 minutes
                 if _SCHEDULER_STOP.wait(300):
                     break
                 continue
-            hour = int(settings.get("auto_pipeline_hour", 3))
-            minute = int(settings.get("auto_pipeline_minute", 0))
+            schedule = _parse_schedule(settings.get("auto_pipeline_schedule", ""))
             now = datetime.now()
-            target = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
-            if target <= now:
-                target += timedelta(days=1)
+            target = _next_firing(now, schedule)
             sleep_s = (target - now).total_seconds()
             logger.info(
-                "[sports_filter] scheduler sleeping %.0fs until next run (%s)",
+                "[sports_filter] scheduler sleeping %.0fs until next run (%s) — schedule=%s",
                 sleep_s, target.isoformat(timespec="seconds"),
+                ",".join(f"{h:02d}{m:02d}" for h, m in schedule),
             )
             if _SCHEDULER_STOP.wait(sleep_s):
                 break
@@ -1011,21 +1085,15 @@ class Plugin:
             },
             {
                 "id": "auto_pipeline_enabled", "type": "boolean",
-                "label": "Daily auto-run pipeline",
+                "label": "Auto-run pipeline on schedule",
                 "default": False,
-                "help_text": "Off by default. When on, the plugin runs classify -> refine_mixed -> apply -> cleanup_orphans once per day at the configured hour. Enable only after you have reviewed dry-run output and trust the cache. Cache makes subsequent runs cheap; only new groups/streams hit the LLM.",
+                "help_text": "Off by default. When on, the plugin runs classify -> refine_mixed -> apply -> cleanup_orphans at every clock time listed in the schedule below. Enable only after you have reviewed dry-run output and trust the cache. Cache makes subsequent runs cheap; only new groups/streams hit the LLM.",
             },
             {
-                "id": "auto_pipeline_hour", "type": "number",
-                "label": "Daily run hour (0-23, server local time)",
-                "default": 3,
-                "help_text": "Hour of day (24h) the auto-pipeline fires. 3 = 3 AM.",
-            },
-            {
-                "id": "auto_pipeline_minute", "type": "number",
-                "label": "Daily run minute (0-59)",
-                "default": 0,
-                "help_text": "Minute of the hour the auto-pipeline fires.",
+                "id": "auto_pipeline_schedule", "type": "string",
+                "label": "Schedule (clock times, comma-separated)",
+                "default": "0300",
+                "help_text": "Comma-separated list of clock times (server local time) when the auto-pipeline fires. Default '0300' is daily at 3 AM. Multi-times-per-day examples: '0000,0600,1200,1800' (every 6h) or '0300,1500' (every 12h). Both 'HHMM' and 'HH:MM' forms work; whitespace is ignored. Invalid entries are skipped with a warning.",
             },
             {
                 "id": "apply_group_rename", "type": "boolean",
