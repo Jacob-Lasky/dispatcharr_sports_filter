@@ -51,12 +51,20 @@ API_KEY_PATH = os.path.join(PLUGIN_DIR, "anthropic_api_key")
 
 # ---------- File helpers ----------
 
-def _read_api_key() -> str:
+def _read_api_key(settings: Optional[Dict[str, Any]] = None) -> str:
+    """Resolve the Anthropic API key. Settings field wins (typed in plugin UI,
+    masked input via input_type=password); falls back to <plugin_dir>/anthropic_api_key
+    on disk (chmod 600) for users who'd rather not paste the key into the DB.
+    """
+    if settings:
+        v = settings.get("anthropic_api_key") or ""
+        if isinstance(v, str) and v.strip():
+            return v.strip()
     try:
         with open(API_KEY_PATH, "r", encoding="utf-8") as f:
             return f.read().strip()
     except FileNotFoundError:
-        logger.warning("[sports_filter] No API key file at %s", API_KEY_PATH)
+        logger.warning("[sports_filter] No API key in settings nor at %s", API_KEY_PATH)
         return ""
 
 
@@ -210,7 +218,7 @@ def _action_classify(settings: Dict[str, Any]) -> Dict[str, Any]:
     if debug:
         logging.getLogger("plugins.dispatcharr_sports_filter").setLevel(logging.DEBUG)
 
-    api_key = _read_api_key()
+    api_key = _read_api_key(settings)
     cache = _read_group_cache()
     groups = _gather_groups(account_id, samples_per_group)
     logger.info("[sports_filter] Classifying %d groups (cache has %d valid entries)", len(groups), len(cache))
@@ -258,7 +266,7 @@ def _action_refine_mixed(settings: Dict[str, Any]) -> Dict[str, Any]:
     if not mixed_groups:
         return {"status": "ok", "message": "No groups marked 'mixed' in cache. Run classify first."}
 
-    api_key = _read_api_key()
+    api_key = _read_api_key(settings)
     if not api_key:
         return {"status": "error", "message": "No API key on disk; can't classify streams."}
 

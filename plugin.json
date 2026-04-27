@@ -1,7 +1,7 @@
 {
   "name": "Sports-Only Group Filter",
   "version": "0.5.0",
-  "description": "3-bucket classifier (pure_sports/mixed/not_sports) + per-stream filter for mixed bouquets via name_match_regex + auto-rename source groups via group_override. Reads ANTHROPIC_API_KEY from <plugin_dir>/anthropic_api_key.",
+  "description": "3-bucket classifier (pure_sports/mixed/not_sports) + per-stream filter for mixed bouquets via name_match_regex + auto-rename source groups via group_override. Anthropic key configurable in settings, or via <plugin_dir>/anthropic_api_key on disk.",
   "author": "Jake (with Claude)",
   "license": "MIT",
   "repo_url": "https://github.com/jacob-lasky/dispatcharr-sports-filter",
@@ -22,6 +22,14 @@
       "default": "2",
       "options": [],
       "help_text": "Populated dynamically from the DB at plugin load."
+    },
+    {
+      "id": "anthropic_api_key",
+      "type": "string",
+      "input_type": "password",
+      "label": "Anthropic API key",
+      "default": "",
+      "help_text": "Masked in the UI. If blank, falls back to <plugin_dir>/anthropic_api_key on disk (chmod 600). Required for LLM classification of ambiguous groups + per-stream classification of mixed groups."
     },
     {
       "id": "model",
