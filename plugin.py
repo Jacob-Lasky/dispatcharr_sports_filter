@@ -40,7 +40,9 @@ import logging
 import os
 import random
 import re
+import sys
 import threading
+import types
 from datetime import datetime, timedelta
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
@@ -53,6 +55,7 @@ from .constants import (
     DEFAULT_STRIP_PREFIXES,
     GROUP_VERDICTS,
     LOGGER_NAME,
+    PLUGIN_KEY,
     PROVIDER_KEY_FILE,
     PROVIDER_SETTINGS_FIELD,
     PROVIDERS,
@@ -889,16 +892,67 @@ def _next_firing(now: datetime, schedule: List[Tuple[int, int]]) -> datetime:
 
 # ---------- Background scheduler ----------
 
-_SCHEDULER_LOCK = threading.Lock()
-_SCHEDULER_THREAD: Optional[threading.Thread] = None
-_SCHEDULER_STOP = threading.Event()
+# Scheduler state lives in a reload-stable sys.modules registry, NOT module
+# globals. DO NOT move thread/stop_event back to module globals: the loader
+# unloads + re-execs this module by file path on EVERY discovery (force_reload,
+# which the plugins-list view / run / settings-save all trigger), resetting
+# module globals to fresh objects. The re-imported incarnation would then never
+# see the thread a prior one started, so the idempotency guard would miss it and
+# spawn a NEW scheduler per discovery — orphaning the old thread AND the Postgres
+# connection it holds. Orphaned threads accumulate one leaked connection apiece
+# until max_connections is hit and every API request blocks on connection
+# acquisition (login times out first); observed wedging this server 2026-06-19.
+# The synthetic registry module has no __file__ under the plugin dir, so the
+# loader's path-based unload leaves it in place across reloads. (Same fix the
+# ranked_matchups plugin landed in its #110/#82/#136.)
+_SCHEDULER_LOCK = threading.Lock()  # guards the start critical section in one incarnation
+_SCHEDULER_REGISTRY_KEY = f"_{PLUGIN_KEY}_scheduler_state"
+
+
+def _scheduler_registry():
+    """Reload-stable holder for (thread, stop_event), stashed in sys.modules so
+    it survives the loader re-exec'ing this module on discovery."""
+    reg = sys.modules.get(_SCHEDULER_REGISTRY_KEY)
+    if reg is None:
+        reg = types.ModuleType(_SCHEDULER_REGISTRY_KEY)
+        reg.thread = None
+        reg.stop_event = None
+        sys.modules[_SCHEDULER_REGISTRY_KEY] = reg
+    return reg
+
+
+def _scheduler_close_db() -> None:
+    """Release this scheduler thread's Django DB connection before parking.
+
+    Django opens a connection lazily on first query and, in a NON-request thread,
+    never closes it automatically. The scheduler reads PluginConfig every tick,
+    so without this it pins one Postgres backend open the whole time it sleeps;
+    orphaned schedulers then leak one connection apiece until max_connections is
+    hit and every request blocks on connection acquisition. Closing before each
+    park keeps a sleeping scheduler at ZERO held connections; the next tick
+    reopens transparently. DO NOT replace the _scheduler_sleep calls below with a
+    bare stop_event.wait — that reintroduces the leak.
+    """
+    try:
+        from django.db import connection
+        connection.close()
+    except Exception:
+        pass
+
+
+def _scheduler_sleep(stop_event: threading.Event, timeout: float) -> bool:
+    """Close the DB connection, THEN park on the stop event. Every scheduler
+    sleep MUST go through here so a parked scheduler holds no connection. Returns
+    True if the stop event fired (caller should exit)."""
+    _scheduler_close_db()
+    return stop_event.wait(timeout=timeout)
 
 
 def _read_persisted_settings() -> Dict[str, Any]:
     """Read the plugin's saved settings from Dispatcharr's PluginConfig."""
     try:
         from apps.plugins.models import PluginConfig
-        cfg = PluginConfig.objects.filter(key="dispatcharr_sports_filter").first()
+        cfg = PluginConfig.objects.filter(key=PLUGIN_KEY).first()
         if cfg and cfg.enabled:
             return cfg.settings or {}
     except Exception as e:
@@ -931,70 +985,104 @@ def _release_scheduler_lock() -> None:
         pass
 
 
-def _scheduler_loop() -> None:
+def _scheduler_loop(stop_event: threading.Event) -> None:
     """Wake at each configured clock time and run the auto_pipeline.
 
     The schedule is a comma-separated list of clock times (e.g. '0300' for
     daily 3 AM, '0000,0600,1200,1800' for every 6 hours). Each loop
     iteration computes the next firing time strictly after `now`,
     sleeps until then, then runs the pipeline.
+
+    `stop_event` is THIS thread's own Event, held in the reload-stable registry
+    (not a module global), so a later reload/disable can stop this exact thread
+    even after the module that started it was unloaded. Holds NO DB connection
+    while parked: every sleep goes through _scheduler_sleep (which closes first),
+    and the finally closes on exit so a reclaimed thread releases its backend
+    instead of leaking it.
     """
     logger.info("[sports_filter] scheduler thread started (pid=%d)", os.getpid())
-    while not _SCHEDULER_STOP.is_set():
-        try:
-            settings = _read_persisted_settings()
-            if not settings.get("auto_pipeline_enabled", False):
-                # Setting flipped off — recheck in 5 minutes
-                if _SCHEDULER_STOP.wait(300):
-                    break
-                continue
-            schedule = _parse_schedule(settings.get("auto_pipeline_schedule", ""))
-            now = datetime.now()
-            target = _next_firing(now, schedule)
-            sleep_s = (target - now).total_seconds()
-            logger.info(
-                "[sports_filter] scheduler sleeping %.0fs until next run (%s) — schedule=%s",
-                sleep_s, target.isoformat(timespec="seconds"),
-                _format_schedule_times(schedule),
-            )
-            if _SCHEDULER_STOP.wait(sleep_s):
-                break
-            # Try to grab the cross-worker lock
-            if not _try_acquire_scheduler_lock():
-                logger.info("[sports_filter] scheduler: lock held by another worker; skipping")
-                # Sleep a minute so we don't spin near the trigger time
-                if _SCHEDULER_STOP.wait(60):
-                    break
-                continue
+    try:
+        while not stop_event.is_set():
             try:
-                logger.info("[sports_filter] scheduler: running auto_pipeline")
-                _action_auto_pipeline(settings)
-            finally:
-                _release_scheduler_lock()
-        except Exception:
-            logger.exception("[sports_filter] scheduler iteration crashed; sleeping 5min")
-            if _SCHEDULER_STOP.wait(300):
-                break
+                settings = _read_persisted_settings()
+                if not settings.get("auto_pipeline_enabled", False):
+                    # Setting flipped off — recheck in 5 minutes
+                    if _scheduler_sleep(stop_event, 300):
+                        break
+                    continue
+                schedule = _parse_schedule(settings.get("auto_pipeline_schedule", ""))
+                now = datetime.now()
+                target = _next_firing(now, schedule)
+                sleep_s = (target - now).total_seconds()
+                logger.info(
+                    "[sports_filter] scheduler sleeping %.0fs until next run (%s) — schedule=%s",
+                    sleep_s, target.isoformat(timespec="seconds"),
+                    _format_schedule_times(schedule),
+                )
+                if _scheduler_sleep(stop_event, sleep_s):
+                    break
+                # Try to grab the cross-worker lock
+                if not _try_acquire_scheduler_lock():
+                    logger.info("[sports_filter] scheduler: lock held by another worker; skipping")
+                    # Sleep a minute so we don't spin near the trigger time
+                    if _scheduler_sleep(stop_event, 60):
+                        break
+                    continue
+                try:
+                    logger.info("[sports_filter] scheduler: running auto_pipeline")
+                    _action_auto_pipeline(settings)
+                finally:
+                    _release_scheduler_lock()
+            except Exception:
+                logger.exception("[sports_filter] scheduler iteration crashed; sleeping 5min")
+                if _scheduler_sleep(stop_event, 300):
+                    break
+    finally:
+        _scheduler_close_db()
     logger.info("[sports_filter] scheduler thread exiting")
 
 
 def _start_scheduler() -> None:
-    """Start the daemon scheduler thread (idempotent across plugin reloads)."""
-    global _SCHEDULER_THREAD
+    """Start the daemon scheduler thread, idempotent across plugin reloads.
+
+    Idempotency is anchored in the reload-stable registry (see the note above the
+    registry), NOT a module global, so a re-imported incarnation sees the thread
+    a prior one started and leaves it running instead of spawning a duplicate.
+    """
+    reg = _scheduler_registry()
     with _SCHEDULER_LOCK:
-        if _SCHEDULER_THREAD and _SCHEDULER_THREAD.is_alive():
+        if reg.thread is not None and reg.thread.is_alive():
             return
-        _SCHEDULER_STOP.clear()
-        _SCHEDULER_THREAD = threading.Thread(
+        stop_event = threading.Event()
+        t = threading.Thread(
             target=_scheduler_loop,
+            args=(stop_event,),
             name="sports-filter-scheduler",
             daemon=True,
         )
-        _SCHEDULER_THREAD.start()
+        t.start()
+        reg.thread = t
+        reg.stop_event = stop_event
 
 
-def _stop_scheduler() -> None:
-    _SCHEDULER_STOP.set()
+def _stop_scheduler(reason: str = "stop signal") -> None:
+    """Signal the registered scheduler thread to exit and briefly block to
+    confirm it did. Reads (thread, stop_event) from the reload-stable registry,
+    so it reclaims the live thread even if a different module incarnation started
+    it; the loop's finally then releases its DB connection."""
+    reg = _scheduler_registry()
+    thread, stop_event = reg.thread, reg.stop_event
+    if stop_event is not None:
+        stop_event.set()
+    if thread is not None and thread.is_alive():
+        thread.join(timeout=5.0)
+        if thread.is_alive():
+            logger.warning(
+                "[sports_filter] scheduler thread did not exit within 5s of %s; "
+                "it will linger until process exit", reason,
+            )
+    reg.thread = None
+    reg.stop_event = None
 
 
 # ---------- Plugin shell ----------
@@ -1223,6 +1311,17 @@ class Plugin:
             _start_scheduler()
         except Exception as e:
             logger.warning("[sports_filter] scheduler failed to start: %s", e)
+
+    def stop(self, context: Optional[Dict[str, Any]] = None) -> None:
+        """Tear down the scheduler thread when the loader disables / deletes the
+        plugin. The loader calls stop() on disable/delete (NOT on routine
+        discovery/reload — that path's orphan reclaim is the registry guard in
+        _start_scheduler). Reads the thread from the reload-stable registry, so it
+        reclaims the live thread even if a different module incarnation started
+        it. Without this the scheduler keeps polling Postgres on its loop, leaking
+        a DB connection per worker until max_connections is hit (#82-class)."""
+        del context  # unused; conform to the loader's stop(context) shape
+        _stop_scheduler("plugin stop")
 
     def run(self, action: Optional[str] = None, params: Optional[Dict[str, Any]] = None, context: Optional[Dict[str, Any]] = None):
         ctx = context or {}

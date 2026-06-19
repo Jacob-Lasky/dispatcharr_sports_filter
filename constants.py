@@ -77,4 +77,10 @@ DEFAULT_SCHEDULE_TIMES = ((3, 0),)
 SCHEDULER_LOCK_KEY = "plugins:sports_filter:auto_pipeline:lock"
 SCHEDULER_LOCK_TTL_S = 1800
 
-LOGGER_NAME = "plugins.dispatcharr_sports_filter"
+# The plugin's registry key (its folder name; the loader derives the key as
+# folder.replace(" ", "_").lower()). Single source of truth: the PluginConfig
+# lookup, the reload-stable scheduler registry key, the logger namespace, and
+# the standalone runner all derive from this rather than repeating the literal.
+PLUGIN_KEY = "dispatcharr_sports_filter"
+
+LOGGER_NAME = f"plugins.{PLUGIN_KEY}"
