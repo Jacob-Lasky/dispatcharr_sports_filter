@@ -37,7 +37,7 @@ Key Dispatcharr models the plugin reads/writes (in `apps.channels.models` +
 | Model | Field this plugin uses |
 |---|---|
 | `ChannelGroup` | `name` (group name as it appears in M3U) |
-| `ChannelGroupM3UAccount` | `enabled`, `auto_channel_sync`, `custom_properties` (where `group_override` and `name_match_regex` live) |
+| `ChannelGroupM3UAccount` | `enabled`, `auto_channel_sync`, `custom_properties` (where `group_override`, `name_match_regex`, and `channel_profile_ids` live) |
 | `Stream` | `name`, `channel_group`, `m3u_account` |
 | `M3UAccount` | account ID for filtering — typically `id=4` for the user's XC provider |
 | `ChannelProfile` / `ChannelProfileMembership` | for assigning sports channels to a profile |
@@ -85,6 +85,13 @@ Source of truth for version: `PLUGIN_VERSION` in `plugin.py`; mirrored in
 **Watch out for:**
 - Three silently-dead built-in regex tokens have been fixed across 0.5.1/0.6.0 (`documentar`, `religi`, `flosport`/`sky/fox/tnt sport`, `sec\+`). All shared the same root cause: `\b` cannot anchor between two word chars or between two non-word chars. If you add a new term to ALLOW_RE/DENY_RE, pick the right anchor: `(y|ies)?` style explicit suffixes for word-char tails, `(?!\w)` for terms ending in a non-word char like `+`. There's a regression test for `sec+` in `tests/test_classifier.py`; add similar pins for any new edge cases.
 - The favorites system is in `dispatcharr_ranked_matchups`, not here. This plugin is purely classify+filter.
+- `apply` must **merge** the configured sports profile into each group's
+  `custom_properties["channel_profile_ids"]`, never overwrite it with
+  `[profile_id]`. Overwriting wipes profile assignments a user curated by
+  hand, and the daily scheduler re-wipes them on every run. `_merge_profile_ids`
+  in `plugin.py` owns that merge (it puts the sports profile first, dedupes,
+  and drops non-positive / non-integer entries); `tests/test_profile_assignments.py`
+  pins the behavior for real + dry-run apply and for repeated applies.
 
 ## Open work
 

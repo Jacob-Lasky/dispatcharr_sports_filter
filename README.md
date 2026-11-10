@@ -32,6 +32,12 @@ apply       : flips ChannelGroupM3UAccount rows + sets group_override targets
 After the next M3U refresh, your channel profile is sports-only with clean
 group names and the noise stripped out.
 
+Apply adds the configured sports profile to each sports group's
+`channel_profile_ids` and preserves additional profiles assigned to that group.
+This lets a separate curated profile keep selected groups across scheduled
+pipeline runs and daily channel replacement. To remove an additional profile,
+edit that group's profile selection in Dispatcharr.
+
 ## Install
 
 1. Clone this repo into your Dispatcharr plugins directory:
