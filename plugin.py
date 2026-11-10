@@ -68,7 +68,7 @@ from .constants import (
     VERDICT_SPORTS,
 )
 
-PLUGIN_VERSION = "0.9.0"
+PLUGIN_VERSION = "0.9.1"
 
 logger = logging.getLogger(LOGGER_NAME)
 
@@ -343,6 +343,19 @@ def _resolve_profile_id(settings: Dict[str, Any]) -> int:
     return int(settings.get("channel_profile_id", DEFAULT_PROFILE_ID))
 
 
+def _merge_profile_ids(profile_id: int, existing: Any) -> List[int]:
+    """Add the sports profile without erasing per-group profile selections."""
+    result = [profile_id]
+    for value in existing if isinstance(existing, list) else []:
+        try:
+            value = int(value)
+        except (TypeError, ValueError, OverflowError):
+            continue
+        if value > 0 and value not in result:
+            result.append(value)
+    return result
+
+
 def _resolve_model(settings: Dict[str, Any]) -> str:
     return settings.get("model", DEFAULT_MODEL)
 
@@ -568,7 +581,9 @@ def _action_apply(settings: Dict[str, Any]) -> Dict[str, Any]:
         if verdict in (VERDICT_PURE_SPORTS, VERDICT_MIXED):
             target_props = dict(r.custom_properties or {})
             target_props["channel_numbering_mode"] = "next_available"
-            target_props["channel_profile_ids"] = [profile_id]
+            target_props["channel_profile_ids"] = _merge_profile_ids(
+                profile_id, target_props.get("channel_profile_ids"),
+            )
 
             # Group rename via group_override.
             # Dry-run case: the target may not exist yet, so we surface a

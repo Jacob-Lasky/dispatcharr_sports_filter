@@ -2,6 +2,14 @@
 
 All notable changes to this plugin are documented here.
 
+## [0.9.1] — 2026-11-10 — preserve additional channel profiles
+
+- Apply retains additional per-group channel profile selections instead of
+  replacing them with only the configured sports profile. Curated profiles
+  therefore keep their auto-sync assignments after scheduled pipeline runs.
+- Regression tests exercise real and dry-run apply for pure and mixed groups,
+  repeated apply, and profile ID compatibility.
+
 ## [0.9.0] — 2026-04-27 — multi-provider LLM support
 
 The plugin shipped Anthropic-only through 0.8.x. Users with an existing
