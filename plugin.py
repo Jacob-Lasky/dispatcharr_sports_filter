@@ -27,6 +27,9 @@ Files:
                        per-provider API key on disk (chmod 600). The plugin
                        picks the file matching the chosen model's provider
                        (claude-* -> anthropic, gpt-* -> openai, gemini-* -> gemini).
+  All four live in Dispatcharr's plugin data directory on 0.34+
+  (/data/plugins/_data/dispatcharr_sports_filter/), and in the plugin folder on
+  older builds. The first 0.34 action copies any older files across once.
 
 Legacy v1 cache values ('sports' / 'not_sports' binary) — 'sports' entries are
 silently dropped on load so they re-flow through the ternary classifier; 'not_sports'
@@ -68,30 +71,102 @@ from .constants import (
     VERDICT_SPORTS,
 )
 
-PLUGIN_VERSION = "0.9.1"
+PLUGIN_VERSION = "0.10.0"
 
 logger = logging.getLogger(LOGGER_NAME)
 
 PLUGIN_DIR = os.path.dirname(os.path.abspath(__file__))
-CACHE_PATH = os.path.join(PLUGIN_DIR, "cache.json")
-STREAM_CACHE_PATH = os.path.join(PLUGIN_DIR, "stream_cache.json")
+CACHE_FILE = "cache.json"
+STREAM_CACHE_FILE = "stream_cache.json"
+CACHE_PATH = os.path.join(PLUGIN_DIR, CACHE_FILE)
+STREAM_CACHE_PATH = os.path.join(PLUGIN_DIR, STREAM_CACHE_FILE)
+
+# Mutable state (caches, on-disk API keys) lives in Dispatcharr's version-stable
+# context["data_dir"] on 0.34+, and beside the code on older builds, which have
+# no data_dir. None means "not configured yet": state stays in PLUGIN_DIR.
+_DATA_DIR: Optional[str] = None
+_LEGACY_IMPORT_MARKER = ".legacy-imported"
+
+
+def _state_dir() -> str:
+    return _DATA_DIR or PLUGIN_DIR
 
 
 # ---------- File helpers ----------
 
 def _api_key_path(provider: str) -> str:
     """Resolve the on-disk fallback path for a provider's API key. Wraps the
-    PLUGIN_DIR + filename join so tests can monkeypatch PLUGIN_DIR or the
+    state-dir + filename join so tests can monkeypatch PLUGIN_DIR or the
     PROVIDER_KEY_FILE map without each test re-deriving the path."""
     if provider not in PROVIDERS:
         raise ValueError(f"unknown provider: {provider!r}")
-    return os.path.join(PLUGIN_DIR, PROVIDER_KEY_FILE[provider])
+    return os.path.join(_state_dir(), PROVIDER_KEY_FILE[provider])
+
+
+def _legacy_state_files() -> List[str]:
+    return [CACHE_FILE, STREAM_CACHE_FILE, *PROVIDER_KEY_FILE.values()]
+
+
+def _import_legacy_state(destination: str) -> None:
+    """Copy state written by 0.9.x beside the code into data_dir, ONCE.
+
+    Copies only files the destination lacks (state already in data_dir wins),
+    publishes each file atomically so an interrupted import stays retryable,
+    and keeps the source mode (the key files are 0600). The marker stops a
+    cache the user deliberately deleted from data_dir being resurrected from
+    the old install on the next action. The flock serialises the uWSGI and
+    Celery processes that can configure storage at the same moment."""
+    import fcntl
+    import shutil
+    import tempfile
+
+    os.makedirs(destination, exist_ok=True)
+    with open(os.path.join(destination, ".legacy-import.lock"), "a") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        marker = os.path.join(destination, _LEGACY_IMPORT_MARKER)
+        if os.path.exists(marker):
+            return
+        for name in _legacy_state_files():
+            source = os.path.join(PLUGIN_DIR, name)
+            target = os.path.join(destination, name)
+            if not os.path.isfile(source) or os.path.exists(target):
+                continue
+            fd, staged = tempfile.mkstemp(prefix=f".{name}.", dir=destination)
+            os.close(fd)
+            try:
+                shutil.copy2(source, staged)
+                os.replace(staged, target)
+            finally:
+                if os.path.exists(staged):
+                    os.unlink(staged)
+            logger.info("[sports_filter] moved %s into the plugin data directory", name)
+        open(marker, "a").close()
+
+
+def _configure_storage(context: Optional[Dict[str, Any]]) -> None:
+    """Point every state path at context["data_dir"] (Dispatcharr 0.34+).
+
+    Called from run(), stop() and the leader hook, the three places a context
+    exists. Dispatcharr creates data_dir when it builds that context, never at
+    import or in __init__, so this cannot run earlier. A context without
+    data_dir (Dispatcharr before 0.34) leaves state beside the code."""
+    global _DATA_DIR, CACHE_PATH, STREAM_CACHE_PATH
+    directory = (context or {}).get("data_dir")
+    if not directory:
+        return
+    directory = os.path.abspath(directory)
+    if directory == _DATA_DIR:
+        return
+    _import_legacy_state(directory)
+    _DATA_DIR = directory
+    CACHE_PATH = os.path.join(directory, CACHE_FILE)
+    STREAM_CACHE_PATH = os.path.join(directory, STREAM_CACHE_FILE)
 
 
 def _read_api_key(settings: Optional[Dict[str, Any]] = None, provider: str = "anthropic") -> str:
     """Resolve the API key for a given LLM provider. Settings field wins (typed
     in plugin UI, masked via input_type=password); falls back to
-    <plugin_dir>/<provider>_api_key on disk (chmod 600) for users who'd rather
+    <state dir>/<provider>_api_key on disk (chmod 600; see _state_dir) for users who'd rather
     not paste a key into the DB.
 
     The on-disk pattern existed before multi-provider support landed. We
@@ -1100,6 +1175,158 @@ def _stop_scheduler(reason: str = "stop signal") -> None:
     reg.stop_event = None
 
 
+def _signal_legacy_scheduler_stop(reason: str) -> None:
+    """Ask a legacy scheduler thread in THIS process to exit, without joining.
+
+    On Dispatcharr 0.34+ the leader service replaces the per-worker thread, but
+    a worker that ran 0.9.x still has that thread parked in the reload-stable
+    registry. Setting its event wakes it, it closes its DB connection and
+    exits. DO NOT join here: this runs from Plugin.__init__, which 0.34 can
+    call on its native leader-election thread, and that thread must not wait
+    on a gevent-hub thread it does not own."""
+    reg = _scheduler_registry()
+    stop_event = reg.stop_event
+    if stop_event is None:
+        return
+    try:
+        stop_event.set()
+        logger.info("[sports_filter] legacy scheduler thread signalled to exit (%s)", reason)
+    except Exception:
+        logger.exception("[sports_filter] could not signal the legacy scheduler thread")
+    reg.thread = None
+    reg.stop_event = None
+
+
+# ---------- Managed service (Dispatcharr 0.34+) ----------
+
+# One Redis key per fired slot. The leader lease is not a fence: during a
+# takeover two leaders can both wake for the same clock time. SET NX on the
+# slot lets exactly one of them queue the pipeline. The day-long TTL outlives
+# any overlap window and lets the key expire on its own.
+SCHEDULED_SLOT_KEY = "plugins:sports_filter:auto_pipeline:slot:{slot}"
+SCHEDULED_SLOT_TTL_S = 86400
+SCHEDULED_PARAM = "_scheduled"
+# The service re-reads settings at least this often, so a schedule or toggle
+# change takes effect without waiting out a long sleep.
+SERVICE_POLL_S = 300
+
+
+def _managed_services() -> bool:
+    """True on Dispatcharr builds with host-owned leader services (0.34+).
+
+    Feature detection, not a version comparison: the loader's service runner
+    is what makes on_leader_acquired fire. Without it this plugin falls back
+    to the legacy per-worker scheduler thread below."""
+    try:
+        from apps.plugins.service_runner import PluginServiceRunner
+    except ImportError:
+        return False
+    return callable(getattr(PluginServiceRunner, "start", None))
+
+
+def _slot_key(slot: datetime) -> str:
+    return SCHEDULED_SLOT_KEY.format(slot=slot.isoformat(timespec="minutes"))
+
+
+def _claim_slot(slot: datetime) -> bool:
+    """Claim one scheduled clock time across leaders. Fails open, matching the
+    legacy scheduler: a Redis outage must not silently stop the daily run."""
+    try:
+        from core.utils import RedisClient
+        rc = RedisClient.get_client()
+        return bool(rc.set(_slot_key(slot), f"pid={os.getpid()}", nx=True, ex=SCHEDULED_SLOT_TTL_S))
+    except Exception as e:
+        logger.warning("[sports_filter] slot claim failed (dispatching anyway): %s", e)
+        return True
+
+
+def _release_slot(slot: datetime) -> None:
+    """Give a claimed slot back after its dispatch failed, so the retry can
+    claim it again instead of finding its own day-long claim."""
+    try:
+        from core.utils import RedisClient
+        RedisClient.get_client().delete(_slot_key(slot))
+    except Exception as e:
+        logger.warning("[sports_filter] slot release failed: %s", e)
+
+
+def _service_loop(stop_event: threading.Event, context: Dict[str, Any],
+                  now: Callable[[], datetime] = datetime.now) -> None:
+    """The leader-elected scheduler: queue auto_pipeline at each clock time.
+
+    Runs in the one process Dispatcharr elects, on the native thread
+    context["start_service"] owns. It only decides WHEN; the pipeline itself
+    runs as a queued `auto_pipeline` action on the plugins Celery queue
+    (context["dispatch_scheduled_task"]), so it gets task history and never
+    holds this thread for the length of an LLM pass.
+
+    `anchor` is the last moment already accounted for, and the next slot is
+    recomputed from it on every wake, so a slot fires at most once per
+    leader. It moves to a slot only once that slot's dispatch succeeded: a
+    failed dispatch gives the claim back and is retried after SERVICE_POLL_S.
+    Disabling the schedule or editing its times resets it to now, so an edit
+    applies within SERVICE_POLL_S and never fires a time that has already
+    passed today. A new leader starts from now, like the legacy thread: no
+    backfill of a slot missed while no process held the lease. Every park
+    closes the DB connection first (_scheduler_sleep), as the legacy loop does."""
+    get_settings = context["get_settings"]
+    dispatch = context["dispatch_scheduled_task"]
+    anchor = now()
+    schedule = None
+    logger.info("[sports_filter] leader-managed scheduler started (pid=%d)", os.getpid())
+    try:
+        while not stop_event.is_set():
+            try:
+                settings = get_settings()
+                if not settings.get("auto_pipeline_enabled", False):
+                    anchor = now()
+                    if _scheduler_sleep(stop_event, SERVICE_POLL_S):
+                        break
+                    continue
+                current_schedule = _parse_schedule(settings.get("auto_pipeline_schedule", ""))
+                if current_schedule != schedule:
+                    schedule, anchor = current_schedule, now()
+                slot = _next_firing(anchor, schedule)
+                current = now()
+                if current < slot:
+                    if _scheduler_sleep(stop_event, min((slot - current).total_seconds(), SERVICE_POLL_S)):
+                        break
+                    continue
+                if _claim_slot(slot):
+                    try:
+                        task_id = dispatch("auto_pipeline", {SCHEDULED_PARAM: True})
+                    except Exception:
+                        _release_slot(slot)
+                        raise
+                    anchor = slot
+                    logger.info("[sports_filter] scheduler: queued auto_pipeline for %s (task %s)",
+                                slot.isoformat(timespec="minutes"), task_id)
+                else:
+                    anchor = slot
+                    logger.info("[sports_filter] scheduler: slot %s already queued by another leader",
+                                slot.isoformat(timespec="minutes"))
+            except Exception:
+                logger.exception("[sports_filter] managed scheduler tick failed; sleeping 5min")
+                if _scheduler_sleep(stop_event, SERVICE_POLL_S):
+                    break
+    finally:
+        _scheduler_close_db()
+        logger.info("[sports_filter] leader-managed scheduler stopped")
+
+
+def _run_scheduled_pipeline(settings: Dict[str, Any]) -> Dict[str, Any]:
+    """A scheduled auto_pipeline, under the same cross-process Redis lock the
+    legacy scheduler took. A scheduled run that finds the lock held reports
+    `partial` rather than stacking a second pipeline on the first."""
+    if not _try_acquire_scheduler_lock():
+        logger.info("[sports_filter] scheduled auto_pipeline skipped: another run holds the lock")
+        return {"status": "partial", "message": "Skipped: another pipeline run is in progress."}
+    try:
+        return _action_auto_pipeline(settings)
+    finally:
+        _release_scheduler_lock()
+
+
 # ---------- Plugin shell ----------
 
 def _build_account_field():
@@ -1229,17 +1456,17 @@ class Plugin:
             {
                 "id": "anthropic_api_key", "type": "string", "input_type": "password",
                 "label": "Anthropic API key", "default": "",
-                "help_text": "Masked in the UI. If blank, falls back to <plugin_dir>/anthropic_api_key on disk (chmod 600). Required when 'LLM model' is set to a Claude (claude-*) model.",
+                "help_text": "Masked in the UI. If blank, falls back to the anthropic_api_key file (chmod 600) in the plugin data directory (/data/plugins/_data/dispatcharr_sports_filter/ on Dispatcharr 0.34+, the plugin folder before). Required when 'LLM model' is set to a Claude (claude-*) model.",
             },
             {
                 "id": "openai_api_key", "type": "string", "input_type": "password",
                 "label": "OpenAI API key", "default": "",
-                "help_text": "Masked in the UI. If blank, falls back to <plugin_dir>/openai_api_key on disk (chmod 600). Required when 'LLM model' is set to an OpenAI (gpt-*, o1-*, o3-*) model.",
+                "help_text": "Masked in the UI. If blank, falls back to the openai_api_key file (chmod 600) in the plugin data directory (/data/plugins/_data/dispatcharr_sports_filter/ on Dispatcharr 0.34+, the plugin folder before). Required when 'LLM model' is set to an OpenAI (gpt-*, o1-*, o3-*) model.",
             },
             {
                 "id": "gemini_api_key", "type": "string", "input_type": "password",
                 "label": "Google Gemini API key", "default": "",
-                "help_text": "Masked in the UI. If blank, falls back to <plugin_dir>/gemini_api_key on disk (chmod 600). Required when 'LLM model' is set to a Gemini (gemini-*) model.",
+                "help_text": "Masked in the UI. If blank, falls back to the gemini_api_key file (chmod 600) in the plugin data directory (/data/plugins/_data/dispatcharr_sports_filter/ on Dispatcharr 0.34+, the plugin folder before). Required when 'LLM model' is set to a Gemini (gemini-*) model.",
             },
             {"id": "dry_run", "type": "boolean", "label": "Dry run on Apply", "default": True},
             # ----- LLM tuning (skip unless you want to refine output) -----
@@ -1318,14 +1545,34 @@ class Plugin:
              "description": "Print cache + account state. No writes."},
         ]
 
-        # Start daily scheduler thread (idempotent across reloads). Each Dispatcharr
-        # worker process loads the plugin and starts its own thread; the cross-worker
-        # Redis lock in _try_acquire_scheduler_lock ensures the pipeline only fires
-        # in one worker per scheduled tick.
+        # Dispatcharr 0.34+ elects ONE process for the scheduler
+        # (on_leader_acquired below). DO NOT start a thread here on those builds:
+        # 0.34 constructs this class in every uWSGI and Celery process, often
+        # twice at once, so a thread started here runs a dozen times over.
+        if _managed_services():
+            _signal_legacy_scheduler_stop("leader service replaces it")
+            return
+        # Older builds: the legacy per-worker daemon thread (idempotent across
+        # reloads). Each worker starts one; the cross-worker Redis lock in
+        # _try_acquire_scheduler_lock lets only one fire per scheduled tick.
         try:
             _start_scheduler()
         except Exception as e:
             logger.warning("[sports_filter] scheduler failed to start: %s", e)
+
+    def on_leader_acquired(self, context: Dict[str, Any]) -> None:
+        """Dispatcharr 0.34+: start the scheduler in the one elected process.
+        Needs the `persistent_service` capability (plugin.json); without it
+        manifest 2 skips leader election and nothing is ever scheduled."""
+        _configure_storage(context)
+        context["start_service"](
+            lambda stop_event: _service_loop(stop_event, context), name="scheduler",
+        )
+
+    def on_leader_lost(self, context: Dict[str, Any]) -> None:
+        """Dispatcharr has already signalled and joined the service thread;
+        its finally released the DB connection. Nothing else is held."""
+        del context
 
     def stop(self, context: Optional[Dict[str, Any]] = None) -> None:
         """Tear down the scheduler thread when the loader disables / deletes the
@@ -1335,6 +1582,9 @@ class Plugin:
         reclaims the live thread even if a different module incarnation started
         it. Without this the scheduler keeps polling Postgres on its loop, leaking
         a DB connection per worker until max_connections is hit (#82-class)."""
+        # On 0.34+ the host stops the leader service itself; this reclaims a
+        # legacy thread, which exists only on older builds or in a worker that
+        # ran 0.9.x before this upgrade.
         del context  # unused; conform to the loader's stop(context) shape
         _stop_scheduler("plugin stop")
 
@@ -1343,11 +1593,19 @@ class Plugin:
         settings = dict(ctx.get("settings") or {})
         if params:
             settings.update(params)
+        scheduled = bool(settings.pop(SCHEDULED_PARAM, False))
         try:
+            _configure_storage(ctx)
+            if action == "auto_pipeline" and scheduled:
+                return _run_scheduled_pipeline(settings)
             handler = ACTION_HANDLERS.get(action or "")
             if handler is not None:
                 return handler(settings)
-            # Lifecycle hooks Dispatcharr calls outside the user-action surface.
+            # Lifecycle hooks older Dispatcharr builds call outside the
+            # user-action surface. 0.34+ rejects undeclared actions, and its
+            # leader service owns scheduling, so these never start a thread there.
+            if _managed_services() and action in ("enable", "disable"):
+                return {"status": "ok", "message": "scheduling is managed by Dispatcharr"}
             if action == "enable":
                 _start_scheduler()
                 return {"status": "ok", "message": "scheduler started"}
