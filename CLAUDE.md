@@ -111,18 +111,20 @@ https://github.com/Jacob-Lasky/dispatcharr_sports_filter/issues
 
 ## Plugin distribution
 
-This plugin is distributed through the official Dispatcharr Plugins
-repository: https://github.com/Dispatcharr/Plugins. When a plugin PR is
-merged there, it gets automatically packaged, versioned, and published to
-the releases branch — no separate release ceremony from the plugin author.
+This plugin is NOT listed in the official Dispatcharr Plugins repository
+(https://github.com/Dispatcharr/Plugins). Checked 2026-11-25 (JAKE-703): its
+`plugins/` directory holds 48 plugins, Jake's only one being
+`dispatcharr-ranked-matchups`, and no Jacob-Lasky PR there ever submitted this
+one. Users install it from this repo. When a plugin PR is merged there, it
+gets automatically packaged, versioned, and published to the releases branch.
 
 **Browse what is available right now:**
 - Listing UI: https://dispatcharr.github.io/Dispatcharr-Docs/plugin-listing/
 - Releases branch: https://github.com/Dispatcharr/Plugins/tree/releases
 - Plugin forum thread (community discussion): https://discord.com/channels/1340492560220684331/1487508974457589973
 
-**Submission flow** (already done for sports_filter v0.6.0; reference for
-future major releases):
+**Submission flow** (not done for this plugin yet; Ranked Matchups follows it.
+A submission reaches the Dispatcharr maintainers, so it needs Jake's yes):
 
 1. Develop and tag the release in this repo (Jacob-Lasky/dispatcharr_sports_filter).
 2. Fork https://github.com/Dispatcharr/Plugins.
