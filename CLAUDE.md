@@ -19,7 +19,7 @@ The user runs Dispatcharr in a Docker container.
 | File | What it does |
 |---|---|
 | `plugin.json` | Plugin manifest — settings, action buttons, default values. Read by Dispatcharr's plugin loader. |
-| `plugin.py` | Plugin class + 6 actions: `classify`, `refine_mixed`, `apply`, `cleanup_orphans`, `auto_pipeline`, `show_status`. Also the daemon scheduler. |
+| `plugin.py` | Plugin class + 6 actions: `classify`, `refine_mixed`, `apply`, `cleanup_orphans`, `auto_pipeline`, `show_status`. Also the scheduler (leader service on 0.34+, daemon thread before). |
 | `classifier.py` | Regex pre-filter (`ALLOW_RE` / `DENY_RE`) + Claude API calls. Two flavors: group-level (3-bucket: pure_sports/mixed/not_sports) and stream-level (binary: sports/not_sports). |
 | `__init__.py` | Exports `Plugin` class. Dispatcharr loads `<plugin_dir>/__init__.py` and looks for `Plugin`. |
 
@@ -27,6 +27,8 @@ State that doesn't live in git:
 - `cache.json` — group classification verdicts. Persists across runs.
 - `stream_cache.json` — per-stream classification verdicts (only for streams in mixed groups).
 - `anthropic_api_key` — file fallback if settings field is empty.
+- All three live in the plugin data directory on Dispatcharr 0.34+
+  (`/data/plugins/_data/dispatcharr_sports_filter/`), in the plugin folder before.
 - `__pycache__/` — Python bytecode.
 
 ## How it integrates with Dispatcharr
@@ -56,9 +58,17 @@ own M3U-import code reads these on every refresh, so renames + filters
   Without this, Dispatcharr caches the loaded `Plugin` instance per worker, so
   edits to `plugin.py` aren't picked up.
 - Each Dispatcharr worker (4× uwsgi + 6× celery) loads its own copy of the
-  plugin. The scheduler thread spawns in each worker — a Redis `SET NX EX`
-  lock at `plugins:sports_filter:auto_pipeline:lock` ensures only one fires
-  per scheduled tick.
+  plugin. On 0.34+ the scheduler is a leader-elected service
+  (`on_leader_acquired` -> `_service_loop`) that queues `auto_pipeline` with
+  `context["dispatch_scheduled_task"]`; `Plugin.__init__` must not start a
+  thread there. Older builds fall back to one scheduler thread per worker. A
+  Redis `SET NX EX` lock at `plugins:sports_filter:auto_pipeline:lock` keeps
+  scheduled pipelines from overlapping either way.
+- Manifest version 2: every capability the code uses must be in
+  `plugin.json` `capabilities` (`tests/test_leader_service.py` pins them).
+  Adding one makes Dispatcharr ask for approval again before enabling.
+- Mutable state goes through `_state_dir()` / `CACHE_PATH`, which
+  `_configure_storage(context)` points at `context["data_dir"]` on 0.34+.
 
 ## Current state (v0.6.0, 2026-04-27)
 

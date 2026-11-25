@@ -48,17 +48,20 @@ edit that group's profile selection in Dispatcharr.
    ```
 
 2. (Optional, only if `enable_llm=true`) stage an API key for the provider
-   matching your chosen model. Pick **one** of:
+   matching your chosen model. On Dispatcharr 0.34 or newer the key file goes
+   in the plugin data directory, `/data/plugins/_data/dispatcharr_sports_filter/` (create it if the plugin has not run
+   yet); on older builds use `/data/plugins/dispatcharr_sports_filter/`
+   instead. Pick **one** of (0.34+ paths shown):
 
    ```bash
    # Anthropic — for claude-* models
-   docker exec dispatcharr sh -c 'echo "sk-ant-..." > /data/plugins/dispatcharr_sports_filter/anthropic_api_key && chmod 600 /data/plugins/dispatcharr_sports_filter/anthropic_api_key'
+   docker exec dispatcharr sh -c 'mkdir -p /data/plugins/_data/dispatcharr_sports_filter && echo "sk-ant-..." > /data/plugins/_data/dispatcharr_sports_filter/anthropic_api_key && chmod 600 /data/plugins/_data/dispatcharr_sports_filter/anthropic_api_key'
 
    # OpenAI — for gpt-* / o1-* / o3-* / o4-* models
-   docker exec dispatcharr sh -c 'echo "sk-..." > /data/plugins/dispatcharr_sports_filter/openai_api_key && chmod 600 /data/plugins/dispatcharr_sports_filter/openai_api_key'
+   docker exec dispatcharr sh -c 'mkdir -p /data/plugins/_data/dispatcharr_sports_filter && echo "sk-..." > /data/plugins/_data/dispatcharr_sports_filter/openai_api_key && chmod 600 /data/plugins/_data/dispatcharr_sports_filter/openai_api_key'
 
    # Google — for gemini-* models
-   docker exec dispatcharr sh -c 'echo "AIza..." > /data/plugins/dispatcharr_sports_filter/gemini_api_key && chmod 600 /data/plugins/dispatcharr_sports_filter/gemini_api_key'
+   docker exec dispatcharr sh -c 'mkdir -p /data/plugins/_data/dispatcharr_sports_filter && echo "AIza..." > /data/plugins/_data/dispatcharr_sports_filter/gemini_api_key && chmod 600 /data/plugins/_data/dispatcharr_sports_filter/gemini_api_key'
    ```
 
    Or paste the key into the matching settings field in the plugin UI
@@ -100,8 +103,8 @@ edit that group's profile selection in Dispatcharr.
   pick any model from the dropdown; provider is inferred from the model
   prefix (`claude-*` → Anthropic, `gpt-*` / `o1-*` / `o3-*` / `o4-*` →
   OpenAI, `gemini-*` → Google). The plugin reads the key field
-  matching the provider, or the on-disk file (`<plugin_dir>/<provider>_api_key`)
-  if the field is blank.
+  matching the provider, or the on-disk file (`<provider>_api_key` in the plugin data directory,
+  see Caches) if the field is blank.
 - `samples_per_group` — how many channel names from a group to send to the
   LLM as classification context (default 6).
 - `extra_allow_terms` / `extra_deny_terms` — comma- or newline-separated
@@ -157,7 +160,11 @@ before flipping the auto-pipeline on.
 
 ## Caches
 
-Both caches live in `<plugin_dir>/`. Safe to delete to force re-classification.
+Both caches and any on-disk API key files live in the plugin data directory:
+`/data/plugins/_data/dispatcharr_sports_filter/` on Dispatcharr 0.34 or newer, which survives plugin updates, and the
+plugin folder itself on older builds. The first action after upgrading to
+0.10.0 on 0.34+ copies any files the plugin folder still holds into the data
+directory, once. Deleting a cache forces re-classification.
 
 ```
 cache.json        : { "Sports | NFL": "pure_sports", "US | Peacock TV": "mixed", ... }
@@ -166,9 +173,18 @@ stream_cache.json : { "NFL Network HD": "sports", "Peacock News HD": "not_sports
 
 ## Scheduler
 
-The plugin spawns one daemon thread per Dispatcharr worker. A Redis-based
-`SET NX EX` lock at key `plugins:sports_filter:auto_pipeline:lock` ensures the
-pipeline only fires in one worker per scheduled tick.
+On Dispatcharr 0.34 or newer the scheduler is a leader-elected service:
+Dispatcharr runs it in one process for the whole server, and at each clock
+time it queues the `auto_pipeline` action on Dispatcharr's background task
+queue, where it shows in the plugin's task history as a scheduled run. The
+manifest declares the capabilities this needs (`background_tasks`,
+`persistent_service`, and `outbound_network` for the LLM calls), so
+Dispatcharr asks an admin to approve them when the plugin is enabled.
+
+On older builds the plugin falls back to one daemon thread per Dispatcharr
+worker. In both cases a Redis `SET NX EX` lock at key
+`plugins:sports_filter:auto_pipeline:lock` keeps two scheduled pipelines from
+running at once.
 
 ## Contributing
 

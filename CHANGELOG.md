@@ -2,6 +2,25 @@
 
 All notable changes to this plugin are documented here.
 
+## [0.10.0] — 2026-11-25 — Dispatcharr 0.34 leader service and data directory
+
+- On Dispatcharr 0.34 or newer, the daily scheduler runs as one leader-elected
+  service for the whole server instead of a thread in every uWSGI and Celery
+  worker. It queues `auto_pipeline` on Dispatcharr's background task queue at
+  each clock time, so scheduled runs appear in the plugin's task history. A
+  Redis claim per clock time keeps a leadership handover from queueing the
+  same run twice, and the existing pipeline lock still stops two scheduled
+  pipelines overlapping.
+- The manifest moves to `manifest_version` 2 and declares `background_tasks`,
+  `persistent_service` and `outbound_network`. Dispatcharr asks an admin to
+  approve these the first time the updated plugin is enabled.
+- `cache.json`, `stream_cache.json` and the on-disk API key files move to the
+  plugin data directory (`/data/plugins/_data/dispatcharr_sports_filter/`),
+  which survives plugin updates. The first action copies existing files across
+  once; files already in the data directory win.
+- Older Dispatcharr builds keep the previous per-worker scheduler thread and
+  the plugin folder for state.
+
 ## [0.9.1] — 2026-11-10 — preserve additional channel profiles
 
 - Apply retains additional per-group channel profile selections instead of

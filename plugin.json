@@ -1,11 +1,17 @@
 {
+  "manifest_version": 2,
   "name": "Sports-Only Group Filter",
-  "version": "0.9.1",
-  "description": "3-bucket classifier (pure_sports/mixed/not_sports) + per-stream filter for mixed bouquets via name_match_regex + auto-rename source groups via group_override. Supports Anthropic / OpenAI / Google Gemini — provider is inferred from the chosen model. Each provider's key is configurable in settings or via <plugin_dir>/{anthropic,openai,gemini}_api_key on disk.",
+  "version": "0.10.0",
+  "description": "3-bucket classifier (pure_sports/mixed/not_sports) + per-stream filter for mixed bouquets via name_match_regex + auto-rename source groups via group_override. Supports Anthropic / OpenAI / Google Gemini — provider is inferred from the chosen model. Each provider's key is configurable in settings or via an {anthropic,openai,gemini}_api_key file in the plugin data directory.",
   "author": "Jake (with Claude)",
   "license": "MIT",
   "repo_url": "https://github.com/Jacob-Lasky/dispatcharr_sports_filter",
   "help_url": "https://github.com/Jacob-Lasky/dispatcharr_sports_filter#readme",
+  "capabilities": [
+    "background_tasks",
+    "persistent_service",
+    "outbound_network"
+  ],
   "fields": [
     {
       "id": "m3u_account_id",
@@ -90,7 +96,7 @@
       "input_type": "password",
       "label": "Anthropic API key",
       "default": "",
-      "help_text": "Masked in the UI. If blank, falls back to <plugin_dir>/anthropic_api_key on disk (chmod 600). Required when 'LLM model' is set to a Claude (claude-*) model."
+      "help_text": "Masked in the UI. If blank, falls back to the anthropic_api_key file (chmod 600) in the plugin data directory (/data/plugins/_data/dispatcharr_sports_filter/ on Dispatcharr 0.34+, the plugin folder before). Required when 'LLM model' is set to a Claude (claude-*) model."
     },
     {
       "id": "openai_api_key",
@@ -98,7 +104,7 @@
       "input_type": "password",
       "label": "OpenAI API key",
       "default": "",
-      "help_text": "Masked in the UI. If blank, falls back to <plugin_dir>/openai_api_key on disk (chmod 600). Required when 'LLM model' is set to an OpenAI (gpt-*, o1-*, o3-*) model."
+      "help_text": "Masked in the UI. If blank, falls back to the openai_api_key file (chmod 600) in the plugin data directory (/data/plugins/_data/dispatcharr_sports_filter/ on Dispatcharr 0.34+, the plugin folder before). Required when 'LLM model' is set to an OpenAI (gpt-*, o1-*, o3-*) model."
     },
     {
       "id": "gemini_api_key",
@@ -106,7 +112,7 @@
       "input_type": "password",
       "label": "Google Gemini API key",
       "default": "",
-      "help_text": "Masked in the UI. If blank, falls back to <plugin_dir>/gemini_api_key on disk (chmod 600). Required when 'LLM model' is set to a Gemini (gemini-*) model."
+      "help_text": "Masked in the UI. If blank, falls back to the gemini_api_key file (chmod 600) in the plugin data directory (/data/plugins/_data/dispatcharr_sports_filter/ on Dispatcharr 0.34+, the plugin folder before). Required when 'LLM model' is set to a Gemini (gemini-*) model."
     },
     {
       "id": "dry_run",
