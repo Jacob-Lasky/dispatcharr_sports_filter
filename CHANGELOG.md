@@ -20,6 +20,14 @@ All notable changes to this plugin are documented here.
   once; files already in the data directory win.
 - Older Dispatcharr builds keep the previous per-worker scheduler thread and
   the plugin folder for state.
+- Upgrading: each Dispatcharr process that loads 0.10.0 tells its own 0.9.x
+  scheduler thread to exit. Restart Dispatcharr after the upgrade so every
+  process does so at once; until then an old thread can still write a cache
+  into the plugin folder after the one-time copy, and that write is not carried
+  over. An update installed through Dispatcharr's plugin manager or a zip
+  import replaces the plugin folder before 0.10.0 first runs, so there is
+  nothing to copy: the caches rebuild on the next classify run, and an
+  on-disk API key file has to be placed in the data directory again.
 
 ## [0.9.1] — 2026-11-10 — preserve additional channel profiles
 

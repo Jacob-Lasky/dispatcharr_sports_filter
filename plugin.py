@@ -1224,19 +1224,30 @@ def _managed_services() -> bool:
     return callable(getattr(PluginServiceRunner, "start", None))
 
 
+def _slot_key(slot: datetime) -> str:
+    return SCHEDULED_SLOT_KEY.format(slot=slot.isoformat(timespec="minutes"))
+
+
 def _claim_slot(slot: datetime) -> bool:
     """Claim one scheduled clock time across leaders. Fails open, matching the
     legacy scheduler: a Redis outage must not silently stop the daily run."""
     try:
         from core.utils import RedisClient
         rc = RedisClient.get_client()
-        return bool(rc.set(
-            SCHEDULED_SLOT_KEY.format(slot=slot.isoformat(timespec="minutes")),
-            f"pid={os.getpid()}", nx=True, ex=SCHEDULED_SLOT_TTL_S,
-        ))
+        return bool(rc.set(_slot_key(slot), f"pid={os.getpid()}", nx=True, ex=SCHEDULED_SLOT_TTL_S))
     except Exception as e:
         logger.warning("[sports_filter] slot claim failed (dispatching anyway): %s", e)
         return True
+
+
+def _release_slot(slot: datetime) -> None:
+    """Give a claimed slot back after its dispatch failed, so the retry can
+    claim it again instead of finding its own day-long claim."""
+    try:
+        from core.utils import RedisClient
+        RedisClient.get_client().delete(_slot_key(slot))
+    except Exception as e:
+        logger.warning("[sports_filter] slot release failed: %s", e)
 
 
 def _service_loop(stop_event: threading.Event, context: Dict[str, Any],
@@ -1249,15 +1260,19 @@ def _service_loop(stop_event: threading.Event, context: Dict[str, Any],
     (context["dispatch_scheduled_task"]), so it gets task history and never
     holds this thread for the length of an LLM pass.
 
-    `anchor` is the last moment already accounted for. The next slot is
-    recomputed from it on every wake, so a schedule edit applies within
-    SERVICE_POLL_S, and a slot is fired at most once per leader. A new
-    leader starts from now, like the legacy thread: no backfill of a slot
-    missed while no process held the lease. Every park closes the DB
-    connection first (_scheduler_sleep), as the legacy loop does."""
+    `anchor` is the last moment already accounted for, and the next slot is
+    recomputed from it on every wake, so a slot fires at most once per
+    leader. It moves to a slot only once that slot's dispatch succeeded: a
+    failed dispatch gives the claim back and is retried after SERVICE_POLL_S.
+    Disabling the schedule or editing its times resets it to now, so an edit
+    applies within SERVICE_POLL_S and never fires a time that has already
+    passed today. A new leader starts from now, like the legacy thread: no
+    backfill of a slot missed while no process held the lease. Every park
+    closes the DB connection first (_scheduler_sleep), as the legacy loop does."""
     get_settings = context["get_settings"]
     dispatch = context["dispatch_scheduled_task"]
     anchor = now()
+    schedule = None
     logger.info("[sports_filter] leader-managed scheduler started (pid=%d)", os.getpid())
     try:
         while not stop_event.is_set():
@@ -1268,19 +1283,26 @@ def _service_loop(stop_event: threading.Event, context: Dict[str, Any],
                     if _scheduler_sleep(stop_event, SERVICE_POLL_S):
                         break
                     continue
-                schedule = _parse_schedule(settings.get("auto_pipeline_schedule", ""))
+                current_schedule = _parse_schedule(settings.get("auto_pipeline_schedule", ""))
+                if current_schedule != schedule:
+                    schedule, anchor = current_schedule, now()
                 slot = _next_firing(anchor, schedule)
                 current = now()
                 if current < slot:
                     if _scheduler_sleep(stop_event, min((slot - current).total_seconds(), SERVICE_POLL_S)):
                         break
                     continue
-                anchor = slot
                 if _claim_slot(slot):
-                    task_id = dispatch("auto_pipeline", {SCHEDULED_PARAM: True})
+                    try:
+                        task_id = dispatch("auto_pipeline", {SCHEDULED_PARAM: True})
+                    except Exception:
+                        _release_slot(slot)
+                        raise
+                    anchor = slot
                     logger.info("[sports_filter] scheduler: queued auto_pipeline for %s (task %s)",
                                 slot.isoformat(timespec="minutes"), task_id)
                 else:
+                    anchor = slot
                     logger.info("[sports_filter] scheduler: slot %s already queued by another leader",
                                 slot.isoformat(timespec="minutes"))
             except Exception:

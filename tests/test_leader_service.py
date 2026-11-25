@@ -101,17 +101,24 @@ class _StopAfter:
         return self._set
 
 
-def _run_loop(monkeypatch, settings, start, waits, claim=True):
+def _run_loop(monkeypatch, settings, start, waits, claim=True, fail_first=0, released=None):
     monkeypatch.setattr(plugin, "_scheduler_close_db", lambda: None)
     monkeypatch.setattr(plugin, "_claim_slot", lambda slot: claim)
+    monkeypatch.setattr(plugin, "_release_slot", lambda slot: (released if released is not None else []).append(slot))
     clock = _Clock(start)
     stop = _StopAfter(clock, waits)
     dispatched = []
-    context = {
-        "get_settings": lambda: dict(settings),
-        "dispatch_scheduled_task": lambda action, params: dispatched.append((action, params, clock.now)) or "task-1",
-    }
-    plugin._service_loop(stop, context, now=clock)
+    failures = [fail_first]
+
+    def dispatch(action, params):
+        if failures[0]:
+            failures[0] -= 1
+            raise RuntimeError("broker down")
+        dispatched.append((action, params, clock.now))
+        return "task-1"
+
+    get_settings = settings if callable(settings) else (lambda: dict(settings))
+    plugin._service_loop(stop, {"get_settings": get_settings, "dispatch_scheduled_task": dispatch}, now=clock)
     return dispatched, stop
 
 
@@ -140,6 +147,32 @@ def test_service_loop_skips_a_slot_another_leader_claimed(monkeypatch):
     settings = {"auto_pipeline_enabled": True, "auto_pipeline_schedule": "0300"}
     dispatched, _ = _run_loop(monkeypatch, settings, datetime(2026, 11, 25, 2, 59), waits=3, claim=False)
     assert dispatched == []
+
+
+def test_service_loop_retries_a_slot_whose_dispatch_failed(monkeypatch):
+    settings = {"auto_pipeline_enabled": True, "auto_pipeline_schedule": "0300"}
+    released = []
+    dispatched, _ = _run_loop(monkeypatch, settings, datetime(2026, 11, 25, 2, 59), waits=3,
+                              fail_first=1, released=released)
+    assert released == [datetime(2026, 11, 25, 3, 0)], "a failed dispatch must give its claim back"
+    assert len(dispatched) == 1 and dispatched[0][2] > datetime(2026, 11, 25, 3, 0), \
+        "the failed 03:00 slot must be retried, not skipped until tomorrow"
+
+
+def test_editing_the_schedule_to_an_elapsed_time_does_not_fire_it(monkeypatch):
+    # The leader fires "1800" on the 24th, then at about 15:00 on the 25th the
+    # user changes it to "0600". 06:00 on the 25th has already passed, so
+    # nothing more may run that day. Every wake is SERVICE_POLL_S apart, so
+    # wake 264 lands at 15:00 on the 25th.
+    calls = {"n": 0}
+
+    def settings():
+        calls["n"] += 1
+        schedule = "1800" if calls["n"] <= 264 else "0600"
+        return {"auto_pipeline_enabled": True, "auto_pipeline_schedule": schedule}
+
+    dispatched, _ = _run_loop(monkeypatch, settings, datetime(2026, 11, 24, 17, 0), waits=280)
+    assert [d[2] for d in dispatched] == [datetime(2026, 11, 24, 18, 0)]
 
 
 def test_scheduled_run_takes_the_pipeline_lock(monkeypatch):

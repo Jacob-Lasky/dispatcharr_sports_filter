@@ -164,7 +164,8 @@ Both caches and any on-disk API key files live in the plugin data directory:
 `/data/plugins/_data/dispatcharr_sports_filter/` on Dispatcharr 0.34 or newer, which survives plugin updates, and the
 plugin folder itself on older builds. The first action after upgrading to
 0.10.0 on 0.34+ copies any files the plugin folder still holds into the data
-directory, once. Deleting a cache forces re-classification.
+directory, once (see the 0.10.0 changelog entry for the upgrade steps).
+Deleting a cache forces re-classification.
 
 ```
 cache.json        : { "Sports | NFL": "pure_sports", "US | Peacock TV": "mixed", ... }
